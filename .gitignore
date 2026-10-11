@@ -1,0 +1,36 @@
+# ===== Секреты и локальные настройки =====
+config.py
+.env
+.venv/
+venv/
+
+# ===== Данные / бэкапы / сессии =====
+*.session
+*.session-journal
+accounts_backup.json
+*.backup.json
+*.bak
+*.db
+*.sqlite3
+sessions/
+backups/
+*.log
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ===== IDE / OS =====
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+desktop.ini
