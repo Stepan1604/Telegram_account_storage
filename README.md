@@ -93,7 +93,6 @@ python run.py
 ```
 .
 ├── run.py                  # Точка входа, polling, уведомления админам
-├── config.example.py       # Шаблон конфигурации (коммитится)
 ├── config.py               # Реальные секреты (игнорируется git)
 ├── database.py             # Модели SQLAlchemy, бэкап/восстановление
 ├── requirements.txt
