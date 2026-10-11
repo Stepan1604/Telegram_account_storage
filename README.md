@@ -1,54 +1,78 @@
 # Telegram Account Storage
 
-Телеграм-бот для хранения, учёта и обслуживания Telegram-аккаунтов:
-покупка аккаунтов на LZT Market, авто-вход через Telethon, смена 2FA,
-чистка сессий, экспорт/импорт, резервные копии.
+**Телеграм-бот для централизованного хранения, учёта и автоматизированного обслуживания Telegram-аккаунтов.** Покупка номеров на LZT Market, авто-вход через Telethon, смена 2FA, чистка сессий, экспорт/импорт и резервное копирование — всё в одном боте с удобным интерфейсом.
 
-## Стек
+---
 
-- Python 3.10+
-- [pyTelegramBotAPI](https://github.com/eternnoir/pyTelegramBotAPI) — бот
-- [Telethon](https://github.com/LonamiWebs/Telethon) — работа с аккаунтами
-- SQLAlchemy + asyncpg — PostgreSQL
-- [LOLZTEAM](https://github.com/asyncee/lolzteam-python) — API LZT Market
+## ✨ Возможности
 
-## Установка
+| Категория | Функции |
+|---|---|
+| **Хранилище** | Добавление, просмотр, редактирование и удаление аккаунтов. Статусы: очищен / не очищен / мёртв. Избранное для быстрого доступа |
+| **LZT Market** | Покупка аккаунтов напрямую через API, автоматическое получение кода входа, контроль баланса и расходов |
+| **Авто-обслуживание** | Авто-вход через Telethon, смена облачного пароля 2FA, очистка сессий, выход из чатов и каналов, удаление истории переписок |
+| **Проверка** | Массовая проверка аккаунтов на «жизнеспособность» (авторизация, бан, деактивация). Автоматическое удаление мёртвых аккаунтов |
+| **Отчёты и статистика** | Ежедневная статистика (добавлено / очищено / куплено / потрачено), логи действий администраторов, история покупок |
+| **Экспорт / Импорт** | Выгрузка аккаунтов в CSV и резервное копирование базы (StringSession) в JSON |
+| **Уведомления** | Оповещение администраторов при старте бота и критических событиях |
+
+---
+
+## 🧰 Стек технологий
+
+- **Python 3.10+**
+- [pyTelegramBotAPI](https://github.com/eternnoir/pyTelegramBotAPI) — Telegram-бот
+- [Telethon](https://github.com/LonamiWebs/Telethon) — работа с Telegram API от лица аккаунтов
+- **SQLAlchemy + asyncpg** — ORM и асинхронный драйвер PostgreSQL
+- [LOLZTEAM](https://github.com/asyncee/lolzteam-python) — интеграция с API LZT Market
+
+---
+
+## 🚀 Быстрый старт
+
+### 1. Клонирование и установка
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/Stepan1604/Telegram_account_storage.git
 cd Telegram_account_storage
 
 python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # Linux / macOS
+
+# Windows:
+.venv\Scripts\activate
+# Linux / macOS:
+source .venv/bin/activate
 
 pip install -r requirements.txt
 ```
 
-## Настройка
+### 2. Настройка
 
-Все секреты хранятся в `config.py`, который **не попадает в репозиторий**
-(см. `.gitignore`). Создайте его на основе примера:
+Все секреты хранятся в `config.py`, который **не попадает в репозиторий** (см. `.gitignore`).
+
+Создайте файл конфигурации из шаблона:
 
 ```bash
-copy config.example.py config.py      # Windows
-# cp config.example.py config.py      # Linux / macOS
+# Windows:
+copy config.example.py config.py
+# Linux / macOS:
+cp config.example.py config.py
 ```
 
-Заполните в `config.py`:
+Заполните обязательные параметры:
 
 | Параметр | Где взять |
 |---|---|
 | `BOT_TOKEN` | [@BotFather](https://t.me/BotFather) |
-| `ADMIN_ID`, `ADMINS` | свой Telegram user id |
+| `ADMIN_ID`, `ADMINS` | Ваш Telegram user id |
 | `API_ID` / `API_HASH` | [my.telegram.org](https://my.telegram.org) |
-| `DB_URL` | строка подключения PostgreSQL |
-| `LZT_API_TOKEN` | личный кабинет LZT Market → API |
-| `PASSWORD_2FA` | пароль облачного 2FA, который выставляется аккаунтам |
+| `DB_URL` | Строка подключения PostgreSQL |
+| `LZT_API_TOKEN` | Личный кабинет LZT Market → API |
+| `PASSWORD_2FA` | Пароль облачного 2FA для аккаунтов |
 
-## База данных
+### 3. База данных
 
-Создайте БД и пользователя в PostgreSQL:
+Создайте базу и пользователя в PostgreSQL:
 
 ```sql
 CREATE DATABASE "AccountStorage";
@@ -56,29 +80,41 @@ CREATE DATABASE "AccountStorage";
 
 Таблицы создаются автоматически при старте (`database.init_db()`).
 
-## Запуск
+### 4. Запуск
 
 ```bash
 python run.py
 ```
 
-## Структура
+---
+
+## 📁 Структура проекта
 
 ```
 .
-├── run.py                 # точка входа, polling, уведомления админам
-├── config.example.py      # шаблон конфигурации (коммитится)
-├── config.py              # реальные секреты (игнорируется git)
-├── database.py            # модели SQLAlchemy, бэкап/восстановление
+├── run.py                  # Точка входа, polling, уведомления админам
+├── config.example.py       # Шаблон конфигурации (коммитится)
+├── config.py               # Реальные секреты (игнорируется git)
+├── database.py             # Модели SQLAlchemy, бэкап/восстановление
 ├── requirements.txt
 └── bot/
-    ├── handlers.py        # команды, колбэки, покупка аккаунтов
-    ├── keyboards.py       # inline/reply-клавиатуры
-    └── lzt.py             # интеграция LZT Market + Telethon
+    ├── handlers.py         # Команды, колбэки, покупка аккаунтов
+    ├── keyboards.py        # Inline / Reply-клавиатуры
+    └── lzt.py              # Интеграция LZT Market + Telethon
 ```
 
-## Безопасность
+---
+
+## 🔐 Безопасность
+
+> ⚠️ **Важно!**
 
 - Никогда не коммитьте `config.py`, `*.session`, `accounts_backup.json` и `.env`.
-- Бэкапы содержат StringSession аккаунтов — храните их вне git и в зашифрованном виде.
-- При утечке токенов: отзовите токен у @BotFather / в кабинете LZT и замените его.
+- Резервные копии содержат `StringSession` аккаунтов — храните их **вне git** и **в зашифрованном виде**.
+- При утечке токенов: отзовите токен у [@BotFather](https://t.me/BotFather) / в кабинете LZT и замените его.
+- Рекомендуется использовать отдельного пользователя PostgreSQL с ограниченными правами.
+
+
+<p align="center">
+  <i>Сделано с ❤️ для автоматизации работы с Telegram-аккаунтами</i>
+</p>
