@@ -54,9 +54,9 @@ pip install -r requirements.txt
 
 ```bash
 # Windows:
-copy config.example.py config.py
+copy config.py
 # Linux / macOS:
-cp config.example.py config.py
+cp config.py
 ```
 
 Заполните обязательные параметры:
@@ -91,7 +91,7 @@ python run.py
 ## 📁 Структура проекта
 
 ```
-.
+
 ├── run.py                  # Точка входа, polling, уведомления админам
 ├── config.py               # Реальные секреты (игнорируется git)
 ├── database.py             # Модели SQLAlchemy, бэкап/восстановление
