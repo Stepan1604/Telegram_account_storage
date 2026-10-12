@@ -1,6 +1,10 @@
 # ===== Секреты и локальные настройки =====
 config.py
 .env
+.env.*
+!.env.example
+secret.key
+*.key
 .venv/
 venv/
 
@@ -12,8 +16,13 @@ accounts_backup.json
 *.bak
 *.db
 *.sqlite3
+storage.db
+storage.db-journal
+storage.db-shm
+storage.db-wal
 sessions/
 backups/
+avatars/
 *.log
 
 # ===== Python =====
@@ -27,10 +36,18 @@ dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
 # ===== IDE / OS =====
 .idea/
 .vscode/
 *.swp
+*.swo
 Thumbs.db
 desktop.ini
+.DS_Store
+
+# ===== Не игнорировать =====
+!.gitkeep
+!config.example.py

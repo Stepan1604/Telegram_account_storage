@@ -6,20 +6,24 @@ from contextlib import contextmanager
 from datetime import datetime, date
 from typing import Optional
 
+from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import (
     BigInteger, Column, DateTime, Integer, String, Text,
     create_engine, text, func,
 )
 from sqlalchemy.orm import declarative_base, scoped_session, sessionmaker
+from sqlalchemy.types import TypeDecorator
 
 try:
-    from config import DB_URL
+    from config import DB_URL, SESSION_ENCRYPTION_KEY
 except Exception:
     DB_URL = "sqlite:///storage.db"
+    SESSION_ENCRYPTION_KEY = ""
 
 logger = logging.getLogger(__name__)
 
 BACKUP_FILE = "accounts_backup.json"
+KEY_FILE = "secret.key"
 
 
 def _to_sync(url: str) -> str:
@@ -62,6 +66,105 @@ def scope():
 
 
 # ═══════════════════════════════════════════════════════════════════════════ #
+#                          ШИФРОВАНИЕ SESSION                                 #
+# ═══════════════════════════════════════════════════════════════════════════ #
+
+_fernet = None
+FERNET_MARKER = "gAAAAA"  # префикс всех Fernet-токенов
+
+
+def _get_fernet() -> Fernet:
+    """Возвращает Fernet-инстанс (кэширует)."""
+    global _fernet
+    if _fernet is not None:
+        return _fernet
+
+    key = None
+
+    # 1) Из config.py
+    if SESSION_ENCRYPTION_KEY:
+        try:
+            key = SESSION_ENCRYPTION_KEY.encode() \
+                if isinstance(SESSION_ENCRYPTION_KEY, str) \
+                else SESSION_ENCRYPTION_KEY
+        except Exception:
+            key = None
+
+    # 2) Из файла secret.key
+    if not key and os.path.exists(KEY_FILE):
+        try:
+            with open(KEY_FILE, "rb") as f:
+                key = f.read().strip()
+        except Exception as e:
+            logger.error(f"❌ Не удалось прочитать {KEY_FILE}: {e}")
+
+    # 3) Генерируем новый
+    if not key:
+        key = Fernet.generate_key()
+        try:
+            with open(KEY_FILE, "wb") as f:
+                f.write(key)
+            logger.warning(
+                "🔐 Сгенерирован новый ключ шифрования.\n"
+                f"   Файл: {KEY_FILE}\n"
+                "   ⚠️ СОХРАНИ ЕГО! Без ключа session не расшифруются."
+            )
+        except Exception as e:
+            logger.error(f"❌ Не удалось сохранить ключ: {e}")
+
+    try:
+        _fernet = Fernet(key)
+    except Exception as e:
+        logger.error(f"❌ Неверный ключ шифрования: {e}")
+        raise
+    return _fernet
+
+
+class EncryptedText(TypeDecorator):
+    """
+    Колонка шифрует при записи и расшифровывает при чтении.
+    Если значение НЕ начинается с FERNET_MARKER — это legacy plaintext,
+    возвращаем как есть. Если начинается, но не расшифровывается —
+    вернём "" (пусто), чтобы Telethon не падал с ValueError.
+    """
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None or value == "":
+            return value
+        s = str(value)
+        # Защита от двойного шифрования
+        if s.startswith(FERNET_MARKER):
+            return s
+        return _get_fernet().encrypt(s.encode("utf-8")).decode("ascii")
+
+    def process_result_value(self, value, dialect):
+        if value is None or value == "":
+            return value
+        s = str(value)
+
+        # Не Fernet-токен → это legacy plaintext, отдаём как есть
+        if not s.startswith(FERNET_MARKER):
+            return s
+
+        # Fernet-токен → расшифровываем
+        try:
+            return _get_fernet().decrypt(s.encode("ascii")).decode("utf-8")
+        except InvalidToken:
+            logger.error(
+                "[decrypt] ❌ InvalidToken — ключ шифрования НЕ подходит к "
+                "этой session.\n"
+                "   Скорее всего secret.key был пересоздан.\n"
+                "   Восстанови session из accounts_backup.json."
+            )
+            return ""
+        except Exception as e:
+            logger.error(f"[decrypt] {type(e).__name__}: {e}")
+            return ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════ #
 #                                  МОДЕЛИ                                     #
 # ═══════════════════════════════════════════════════════════════════════════ #
 
@@ -71,7 +174,7 @@ class Account(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     phone = Column(String(32), unique=True, index=True, nullable=False)
     name = Column(String(64), default="")
-    session = Column(Text, nullable=False)
+    session = Column(EncryptedText, nullable=False)
     two_fa = Column(Text, default="")
     registered_at = Column(DateTime, default=datetime.now)
     status = Column(String(16), default="uncleaned")
@@ -148,7 +251,7 @@ def _account_to_dict(acc: Account) -> dict:
     return {
         "phone": acc.phone,
         "name": acc.name or acc.phone,
-        "session": acc.session,
+        "session": acc.session,   # plaintext (расшифрован ORM)
         "two_fa": acc.two_fa or "",
         "registered_at": acc.registered_at.isoformat() if acc.registered_at else None,
         "status": acc.status,
@@ -212,7 +315,7 @@ def restore_from_backup() -> int:
                     s.add(Account(
                         phone=phone,
                         name=item.get("name") or phone,
-                        session=session,
+                        session=session,   # ORM зашифрует
                         two_fa=item.get("two_fa", "") or "",
                         registered_at=reg_dt,
                         status=item.get("status", "uncleaned") or "uncleaned",
@@ -234,7 +337,7 @@ def restore_from_backup() -> int:
 
 
 # ═══════════════════════════════════════════════════════════════════════════ #
-#                                MIGRATIONS                                   #
+#                          МИГРАЦИИ / INIT                                    #
 # ═══════════════════════════════════════════════════════════════════════════ #
 
 _ACCOUNT_COLUMNS = [
@@ -277,14 +380,56 @@ def _migrate() -> None:
         logger.warning(f"[_migrate] fill: {e}")
 
 
+def _migrate_encrypt_sessions() -> None:
+    """Шифрует plaintext session_string у существующих записей."""
+    try:
+        f = _get_fernet()
+
+        with engine.begin() as conn:
+            rows = conn.execute(
+                text("SELECT id, session FROM accounts WHERE session IS NOT NULL")
+            ).fetchall()
+
+        to_encrypt = []
+        for row_id, raw in rows:
+            if raw and isinstance(raw, str) and not raw.startswith(FERNET_MARKER):
+                to_encrypt.append((row_id, raw))
+
+        if not to_encrypt:
+            return
+
+        with engine.begin() as conn:
+            for row_id, raw in to_encrypt:
+                enc = f.encrypt(raw.encode("utf-8")).decode("ascii")
+                conn.execute(
+                    text("UPDATE accounts SET session = :s WHERE id = :id"),
+                    {"s": enc, "id": row_id}
+                )
+
+        logger.info(f"🔐 Зашифровано session_string: {len(to_encrypt)}")
+    except Exception as e:
+        logger.error(f"❌ _migrate_encrypt_sessions: {type(e).__name__}: {e}")
+        logger.debug(traceback.format_exc())
+
+
 def init_db() -> None:
+    # Инициализируем ключ шифрования ДО первого чтения/записи
+    try:
+        _get_fernet()
+    except Exception as e:
+        logger.exception(f"❌ Не удалось инициализировать шифрование: {e}")
+        raise
+
     try:
         Base.metadata.create_all(engine)
         logger.info("✅ Таблицы проверены/созданы")
     except Exception as e:
         logger.exception(f"❌ create_all: {e}")
         raise
+
     _migrate()
+    _migrate_encrypt_sessions()
+
     restored = restore_from_backup()
     if restored == 0:
         save_backup()
@@ -304,7 +449,7 @@ def add_account(phone: str, session_str: str, two_fa: str = "",
         with scope() as s:
             acc = s.query(Account).filter(Account.phone == phone).first()
             if acc:
-                acc.session = session_str
+                acc.session = session_str      # ORM зашифрует
                 acc.two_fa = two_fa
                 acc.status = "uncleaned"
                 acc.registered_at = datetime.now()
@@ -324,7 +469,7 @@ def add_account(phone: str, session_str: str, two_fa: str = "",
                 s.add(Account(
                     phone=phone,
                     name=name or phone,
-                    session=session_str,
+                    session=session_str,       # ORM зашифрует
                     two_fa=two_fa,
                     status="uncleaned",
                     registered_at=datetime.now(),
@@ -558,21 +703,12 @@ def get_account_actions(account_id: int, limit: int = 30):
 
 
 def get_action_counts(account_id: int) -> dict:
-    """Возвращает {'clean': N, 'check': N, ...} для одного аккаунта."""
     with scope() as s:
         rows = (s.query(ActionLog.action, func.count(ActionLog.id))
                 .filter(ActionLog.account_id == account_id)
                 .group_by(ActionLog.action)
                 .all())
     return {r[0]: r[1] for r in rows}
-
-
-def get_user_actions(user_id: int, limit: int = 50):
-    with scope() as s:
-        return (s.query(ActionLog)
-                .filter(ActionLog.user_id == user_id)
-                .order_by(ActionLog.created_at.desc())
-                .limit(limit).all())
 
 
 # ═══════════════════════════════════════════════════════════════════════════ #
@@ -616,7 +752,6 @@ def get_daily_stats(days: int = 30):
 
 
 def get_totals_stats() -> dict:
-    """Суммы по всем дням."""
     with scope() as s:
         added = s.query(func.coalesce(func.sum(DailyStat.added), 0)).scalar()
         cleaned = s.query(func.coalesce(func.sum(DailyStat.cleaned), 0)).scalar()
@@ -681,14 +816,6 @@ def get_lzt_purchases(status: Optional[str] = None, limit: int = 200):
         if status:
             q = q.filter(LZTPurchase.status == status)
         return q.order_by(LZTPurchase.bought_at.desc()).limit(limit).all()
-
-
-def get_lzt_purchases_count(status: Optional[str] = None) -> int:
-    with scope() as s:
-        q = s.query(LZTPurchase)
-        if status:
-            q = q.filter(LZTPurchase.status == status)
-        return q.count()
 
 
 def get_known_lzt_item_ids() -> set:

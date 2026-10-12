@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import sys
 from datetime import datetime
 
@@ -10,6 +11,10 @@ from config import BOT_TOKEN, ADMIN_ID, ADMINS
 
 logger = logging.getLogger("runner")
 
+
+# ═══════════════════════════════════════════════════════════════════════════ #
+#                                ЛОГИРОВАНИЕ                                  #
+# ═══════════════════════════════════════════════════════════════════════════ #
 
 def setup_logging():
     fmt = logging.Formatter(
@@ -35,12 +40,36 @@ def setup_logging():
 setup_logging()
 
 
+# ═══════════════════════════════════════════════════════════════════════════ #
+#                              БОТ                                            #
+# ═══════════════════════════════════════════════════════════════════════════ #
+
 if ADMIN_ID not in ADMINS:
     ADMINS.append(ADMIN_ID)
 
 bot = AsyncTeleBot(BOT_TOKEN)
 
 from bot.handlers import register_handlers  # noqa: E402
+
+
+# ═══════════════════════════════════════════════════════════════════════════ #
+#                              УТИЛИТЫ                                         #
+# ═══════════════════════════════════════════════════════════════════════════ #
+
+def check_encryption_key():
+    """Проверяет наличие файла ключа шифрования."""
+    try:
+        if os.path.exists("secret.key"):
+            size = os.path.getsize("secret.key")
+            logger.info(f"🔐 Шифрование session включено (secret.key, {size} байт)")
+        else:
+            logger.warning(
+                "⚠️ Файл secret.key не найден.\n"
+                "   При первом обращении к БД ключ будет сгенерирован автоматически.\n"
+                "   ⚠️ СОХРАНИ его — без ключа session не расшифруются."
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось проверить secret.key: {e}")
 
 
 async def notify_startup():
@@ -63,6 +92,10 @@ async def notify_startup():
             logger.warning(f"Не отправлено {admin_id}: {e}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════ #
+#                              ЗАПУСК                                          #
+# ═══════════════════════════════════════════════════════════════════════════ #
+
 async def main():
     import database as db
 
@@ -70,6 +103,10 @@ async def main():
     logger.info("🚀 Запуск бота")
     logger.info("=" * 60)
 
+    # 1) Проверка ключа шифрования
+    check_encryption_key()
+
+    # 2) Инициализация БД
     try:
         db.init_db()
         logger.info("✅ БД инициализирована")
@@ -77,15 +114,18 @@ async def main():
         logger.exception(f"❌ Ошибка БД: {e}")
         return
 
+    # 3) Регистрация хендлеров
     register_handlers(bot)
     logger.info("✅ Хендлеры зарегистрированы")
 
+    # 4) Уведомление админов
     try:
         await notify_startup()
         logger.info("✅ Уведомление отправлено")
     except Exception as e:
         logger.warning(f"⚠️ Уведомление: {e}")
 
+    # 5) Polling
     logger.info("✅ Polling...")
     try:
         await bot.infinity_polling(
@@ -105,6 +145,13 @@ def run():
         logger.info("🛑 Остановлен")
     except Exception as e:
         logger.exception(f"❌ Критическая ошибка: {e}")
+    finally:
+        try:
+            import database as db
+            db.Session.remove()
+            db.engine.dispose()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
