@@ -59,8 +59,8 @@ from bot.handlers import register_handlers  # noqa: E402
 def check_encryption_key():
     """Проверяет наличие файла ключа шифрования."""
     try:
-        if os.path.exists("secret.key"):
-            size = os.path.getsize("secret.key")
+        if os.path.exists("data/secret.key"):
+            size = os.path.getsize("data/secret.key")
             logger.info(f"🔐 Шифрование session включено (secret.key, {size} байт)")
         else:
             logger.warning(

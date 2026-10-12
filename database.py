@@ -22,7 +22,7 @@ except Exception:
 
 logger = logging.getLogger(__name__)
 
-BACKUP_FILE = "accounts_backup.json"
+BACKUP_FILE = "data/accounts_backup.json"
 KEY_FILE = "secret.key"
 
 

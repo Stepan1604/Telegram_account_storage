@@ -30,19 +30,16 @@ AVATAR_DIR = "avatars"
 
 
 # ═══════════════════════════════════════════════════════════════════════════ #
-#                            ЕДИНЫЙ ФОРМАТ НОМЕРА                             #
+#                            ФОРМАТ НОМЕРА                                     #
 # ═══════════════════════════════════════════════════════════════════════════ #
 
 def fmt_phone(phone: str) -> str:
-    """Приводит номер к единому виду: +XXXXXXXXXXX (только цифры с ведущим +)."""
+    """Единый формат номера: +XXXXXXXXXXX (только цифры, ведущий +)."""
     if not phone:
         return phone
     s = str(phone).strip()
-    # Убираем разделители
     s = re.sub(r"[\s\-\(\)\.]", "", s)
-    # Оставляем только + и цифры
     s = re.sub(r"[^\d+]", "", s)
-    # Один + в самом начале
     if s.startswith("+"):
         s = "+" + s[1:].replace("+", "")
     else:
@@ -148,13 +145,11 @@ def extract_phone(text: str) -> Optional[str]:
     """Возвращает номер в формате +XXXXXXXXXXX или None."""
     if not text:
         return None
-    # 1) номер с явным +
     m = re.search(r"(\+\d[\d\s\-\(\)\.]{7,20})", text)
     if m:
         s = fmt_phone(m.group(1))
         if s.startswith("+") and len(s) >= 11:
             return s
-    # 2) длинная последовательность цифр (10–15) — считаем номером
     m = re.search(r"\b(\d{10,15})\b", text)
     if m:
         return fmt_phone(m.group(1))
@@ -374,17 +369,17 @@ async def login_to_account(phone: str, item_id: int, market,
     """
     Заходит на купленный аккаунт.
     Возвращает (session_str, status):
-      - ("1BVts...", "ok")          — успех
-      - (None, "needs_2fa")         — нужен пароль 2FA, но его нет
-      - (None, "no_code_from_market") — LZT не отдал код
-      - (None, "invalid_code")       — код не подошёл
-      - (None, "send_unavailable")   — Telegram не даёт запросить код
-      - (None, "phone_banned")       — номер забанен
-      - (None, "phone_invalid")      — неверный номер
-      - (None, "phone_flood")        — слишком частые запросы
-      - (None, "flood_60")           — FloodWait
-      - (None, "timeout")            — таймаут
-      - (None, "error:...")          — прочее
+      - ("1BVts...", "ok")
+      - (None, "needs_2fa")
+      - (None, "no_code_from_market")
+      - (None, "invalid_code")
+      - (None, "send_unavailable")
+      - (None, "phone_banned")
+      - (None, "phone_invalid")
+      - (None, "phone_flood")
+      - (None, "flood_N")
+      - (None, "timeout")
+      - (None, "error:...")
     """
     phone = fmt_phone(phone)
     client = TelegramClient(StringSession(), API_ID, API_HASH)
@@ -410,8 +405,7 @@ async def login_to_account(phone: str, item_id: int, market,
             current_hash = sent.phone_code_hash
             logger.info(f"[lzt.login] {phone}: код запрошен")
         except errors.SendCodeUnavailableError as e:
-            logger.warning(f"[lzt.login] {phone}: SendCodeUnavailable на 1-м "
-                           f"запросе: {e}")
+            logger.warning(f"[lzt.login] {phone}: SendCodeUnavailable: {e}")
             return None, "send_unavailable"
         except errors.PhoneNumberBannedError:
             logger.warning(f"[lzt.login] {phone}: номер забанен")
@@ -426,13 +420,12 @@ async def login_to_account(phone: str, item_id: int, market,
             logger.warning(f"[lzt.login] {phone}: FloodWait {e.seconds}с")
             return None, f"flood_{e.seconds}"
         except asyncio.TimeoutError:
-            logger.warning(f"[lzt.login] {phone}: timeout на send_code_request")
+            logger.warning(f"[lzt.login] {phone}: timeout на send_code")
             return None, "timeout"
 
         # --- 2) ЦИКЛ ОЖИДАНИЯ КОДА --- #
         for round_no in range(CODE_ROUNDS):
             if round_no > 0:
-                # Пытаемся перезапросить код, но не падаем при ошибках
                 logger.info(f"[lzt.login] {phone}: повторный запрос кода "
                             f"({round_no + 1}/{CODE_ROUNDS})")
                 try:
@@ -447,8 +440,7 @@ async def login_to_account(phone: str, item_id: int, market,
                     logger.warning(f"[lzt.login] {phone}: PhoneNumberFlood, "
                                    f"оставляю прежний hash")
                 except errors.FloodWaitError as e:
-                    logger.warning(f"[lzt.login] {phone}: FloodWait {e.seconds}с, "
-                                   f"пауза")
+                    logger.warning(f"[lzt.login] {phone}: FloodWait {e.seconds}с")
                     await asyncio.sleep(min(e.seconds, 60))
                 except errors.PhoneNumberBannedError:
                     logger.warning(f"[lzt.login] {phone}: номер забанен")
@@ -479,11 +471,9 @@ async def login_to_account(phone: str, item_id: int, market,
                     logger.info(f"[lzt.login] {phone}: код {code} не подошёл")
                     continue
                 except errors.PhoneCodeExpiredError:
-                    logger.warning(f"[lzt.login] {phone}: код истёк, "
-                                   f"нужен новый")
-                    break  # выходим из внутреннего цикла
+                    logger.warning(f"[lzt.login] {phone}: код истёк")
+                    break
                 except errors.SessionPasswordNeededError:
-                    # 2FA
                     if not password:
                         logger.info(f"[lzt.login] {phone}: нужен 2FA-пароль")
                         return None, "needs_2fa"
@@ -518,7 +508,7 @@ async def login_to_account(phone: str, item_id: int, market,
                         return None, "bad_2fa_password"
                     except errors.FloodWaitError as e:
                         logger.warning(f"[lzt.login] {phone}: FloodWait "
-                                       f"на sign_in 2FA: {e.seconds}с")
+                                       f"на 2FA: {e.seconds}с")
                         await asyncio.sleep(min(e.seconds, 60))
                         return None, f"flood_{e.seconds}"
                 except errors.FloodWaitError as e:
@@ -545,7 +535,7 @@ async def login_to_account(phone: str, item_id: int, market,
         except Exception as e:
             logger.error(f"[lzt.login] {phone}: session.save: "
                          f"{type(e).__name__}: {e}")
-            return None, f"error:session_save"
+            return None, "error:session_save"
 
         if not session_str:
             return None, "error:empty_session"

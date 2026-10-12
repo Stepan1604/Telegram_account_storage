@@ -1,6 +1,10 @@
 from telebot import types
 
 
+# ═══════════════════════════════════════════════════════════════════════════ #
+#                              ХЕЛПЕРЫ                                         #
+# ═══════════════════════════════════════════════════════════════════════════ #
+
 def btn(text: str, cb: str) -> types.InlineKeyboardButton:
     return types.InlineKeyboardButton(text=text, callback_data=cb)
 
@@ -9,7 +13,9 @@ def kb(rows) -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(rows)
 
 
-# ------------------------------ ГЛАВНОЕ МЕНЮ ------------------------------ #
+# ═══════════════════════════════════════════════════════════════════════════ #
+#                              ГЛАВНОЕ МЕНЮ                                    #
+# ═══════════════════════════════════════════════════════════════════════════ #
 
 def main_menu() -> types.InlineKeyboardMarkup:
     return kb([
@@ -32,16 +38,24 @@ def cancel() -> types.InlineKeyboardMarkup:
     return kb([[btn("🔙 ОТМЕНА", "main_menu")]])
 
 
-# ------------------------------ ХРАНИЛИЩЕ / ИЗБРАННОЕ ------------------------------ #
+# ═══════════════════════════════════════════════════════════════════════════ #
+#                          ХРАНИЛИЩЕ / ИЗБРАННОЕ                               #
+# ═══════════════════════════════════════════════════════════════════════════ #
 
 def storage_page(accounts, page: int, total_pages: int,
                  page_size: int = 5) -> types.InlineKeyboardMarkup:
     rows = []
     for acc in accounts:
-        emoji = {"cleaned": "🧹", "uncleaned": "⚠️", "dead": "❌"}.get(acc.status, "•")
+        emoji = {
+            "cleaned": "🧹",
+            "uncleaned": "⚠️",
+            "dead": "❌",
+        }.get(acc.status, "•")
         star = "⭐ " if (acc.favorite or 0) == 1 else ""
         label = acc.name or acc.phone
-        rows.append([btn(f"{star}{emoji} {label}", f"acc_view_{acc.id}_{page}")])
+        rows.append([
+            btn(f"{star}{emoji} {label}", f"acc_view_{acc.id}_{page}")
+        ])
 
     nav = []
     if page > 0:
@@ -58,9 +72,15 @@ def favorites_page(accounts, page: int, total_pages: int,
                    page_size: int = 5) -> types.InlineKeyboardMarkup:
     rows = []
     for acc in accounts:
-        emoji = {"cleaned": "🧹", "uncleaned": "⚠️", "dead": "❌"}.get(acc.status, "•")
+        emoji = {
+            "cleaned": "🧹",
+            "uncleaned": "⚠️",
+            "dead": "❌",
+        }.get(acc.status, "•")
         label = acc.name or acc.phone
-        rows.append([btn(f"⭐ {emoji} {label}", f"acc_view_{acc.id}_{page}")])
+        rows.append([
+            btn(f"⭐ {emoji} {label}", f"acc_view_{acc.id}_{page}")
+        ])
 
     nav = []
     if page > 0:
@@ -73,7 +93,9 @@ def favorites_page(accounts, page: int, total_pages: int,
     return kb(rows)
 
 
-# ------------------------------ КАРТОЧКА АККАУНТА ------------------------------ #
+# ═══════════════════════════════════════════════════════════════════════════ #
+#                          КАРТОЧКА АККАУНТА                                    #
+# ═══════════════════════════════════════════════════════════════════════════ #
 
 def account_card(acc, page: int) -> types.InlineKeyboardMarkup:
     current = acc.name or acc.phone
@@ -81,11 +103,13 @@ def account_card(acc, page: int) -> types.InlineKeyboardMarkup:
         fav_label = "★ УБРАТЬ ИЗ ИЗБРАННОГО"
     else:
         fav_label = "☆ В ИЗБРАННОЕ"
+
     return kb([
         [btn("🔑 ПОЛУЧИТЬ КОД", f"acc_code_{acc.id}_{page}")],
         [btn("🔄 ОБНОВИТЬ ИНФУ", f"acc_view_{acc.id}_{page}")],
         [btn("🧹 ОЧИСТИТЬ СЕССИИ", f"acc_clean_{acc.id}_{page}")],
         [btn("🗑️ ОЧИСТИТЬ ЧАТЫ", f"acc_clear_chats_{acc.id}_{page}")],
+        [btn("📆 УСТАНОВИТЬ TTL 12 МЕС", f"acc_ttl_{acc.id}_{page}")],
         [btn("📊 ОТЧЁТ ПО АККАУНТУ", f"acc_report_{acc.id}_{page}")],
         [btn("📤 ЭКСПОРТ ЭТОГО АККАУНТА", f"acc_export_{acc.id}_{page}")],
         [btn(fav_label, f"acc_fav_{acc.id}_{page}")],
@@ -98,9 +122,12 @@ def account_card(acc, page: int) -> types.InlineKeyboardMarkup:
 
 def status_menu(acc_id: int, page: int) -> types.InlineKeyboardMarkup:
     return kb([
-        [btn("🧹 Очищен от чужих сессий", f"acc_status_set_{acc_id}_cleaned_{page}")],
-        [btn("⚠️ Ожидает очистки", f"acc_status_set_{acc_id}_uncleaned_{page}")],
-        [btn("❌ Мёртвый аккаунт", f"acc_status_set_{acc_id}_dead_{page}")],
+        [btn("🧹 Очищен от чужих сессий",
+             f"acc_status_set_{acc_id}_cleaned_{page}")],
+        [btn("⚠️ Ожидает очистки",
+             f"acc_status_set_{acc_id}_uncleaned_{page}")],
+        [btn("❌ Мёртвый аккаунт",
+             f"acc_status_set_{acc_id}_dead_{page}")],
         [btn("🔙 НАЗАД", f"acc_view_{acc_id}_{page}")],
     ])
 
@@ -112,7 +139,9 @@ def confirm_delete(acc_id: int, page: int) -> types.InlineKeyboardMarkup:
     ])
 
 
-# ------------------------------ ОТЧЁТЫ ------------------------------ #
+# ═══════════════════════════════════════════════════════════════════════════ #
+#                              ОТЧЁТЫ                                          #
+# ═══════════════════════════════════════════════════════════════════════════ #
 
 def reports_menu() -> types.InlineKeyboardMarkup:
     return kb([
@@ -162,7 +191,9 @@ def account_history_kb(acc_id: int, page: int) -> types.InlineKeyboardMarkup:
     ])
 
 
-# ------------------------------ LZT-ЛОГИ ------------------------------ #
+# ═══════════════════════════════════════════════════════════════════════════ #
+#                              LZT-ЛОГИ                                        #
+# ═══════════════════════════════════════════════════════════════════════════ #
 
 def lzt_logs_menu() -> types.InlineKeyboardMarkup:
     return kb([
@@ -179,11 +210,15 @@ def lzt_logs_page(items, page: int, total_pages: int, filter_type: str,
     rows = []
     for it in items:
         icon = {
-            "bought": "🟡", "logged_in": "🟢", "failed": "🔴",
+            "bought": "🟡",
+            "logged_in": "🟢",
+            "failed": "🔴",
         }.get(it.status, "•")
         phone = it.phone or "?"
-        rows.append([btn(f"{icon} #{it.item_id} {phone}",
-                         f"lzt_log_view_{it.item_id}_{filter_type}_{page}")])
+        rows.append([
+            btn(f"{icon} #{it.item_id} {phone}",
+                f"lzt_log_view_{it.item_id}_{filter_type}_{page}")
+        ])
 
     nav = []
     if page > 0:
@@ -200,15 +235,19 @@ def lzt_log_detail_kb(item_id: int, filter_type: str, page: int,
                       can_retry: bool = False) -> types.InlineKeyboardMarkup:
     rows = []
     if can_retry:
-        rows.append([btn("🔁 ПОВТОРИТЬ ВХОД",
-                         f"lzt_retry_{item_id}_{filter_type}_{page}")])
+        rows.append([
+            btn("🔁 ПОВТОРИТЬ ВХОД",
+                f"lzt_retry_{item_id}_{filter_type}_{page}")
+        ])
     rows.append([btn("🔙 К СПИСКУ", f"lzt_logs_{filter_type}_{page}")])
     rows.append([btn("📥 LZT-ЛОГИ", "lzt_logs")])
     rows.append([btn("🏠 ГЛАВНОЕ МЕНЮ", "main_menu")])
     return kb(rows)
 
 
-# ------------------------------ ПРОВЕРКА / ОЧИСТКА ------------------------------ #
+# ═══════════════════════════════════════════════════════════════════════════ #
+#                          ПРОВЕРКА / ОЧИСТКА                                  #
+# ═══════════════════════════════════════════════════════════════════════════ #
 
 def confirm_clean() -> types.InlineKeyboardMarkup:
     return kb([
@@ -236,7 +275,9 @@ def after_check(has_dead: bool) -> types.InlineKeyboardMarkup:
     return kb(rows)
 
 
-# ------------------------------ ПОКУПКА LZT ------------------------------ #
+# ═══════════════════════════════════════════════════════════════════════════ #
+#                              ПОКУПКА LZT                                     #
+# ═══════════════════════════════════════════════════════════════════════════ #
 
 def buy_menu() -> types.InlineKeyboardMarkup:
     return kb([

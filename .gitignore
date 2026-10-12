@@ -11,7 +11,7 @@ venv/
 # ===== Данные / бэкапы / сессии =====
 *.session
 *.session-journal
-accounts_backup.json
+data/accounts_backup.json
 *.backup.json
 *.bak
 *.db
