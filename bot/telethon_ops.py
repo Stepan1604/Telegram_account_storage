@@ -30,7 +30,7 @@ _lock = asyncio.Lock()
 #                          УПРАВЛЕНИЕ КЛИЕНТАМИ                                #
 # ═══════════════════════════════════════════════════════════════════════════ #
 
-async def _get_client(phone: str, session_string: str) -> TelegramClient:
+async def get_client(phone: str, session_string: str) -> TelegramClient:
     async with _lock:
         c = _clients.get(phone)
         if c and c.is_connected():
@@ -69,7 +69,7 @@ async def is_alive(session_string: str, phone: str):
     if not session_string:
         return False, "Нет session"
     try:
-        c = await _get_client(phone, session_string)
+        c = await get_client(phone, session_string)
         if not await asyncio.wait_for(c.is_user_authorized(), timeout=10):
             await close_client(phone)
             return False, "Сессия не авторизована"
@@ -94,7 +94,7 @@ async def read_login_code(session_string: str, phone: str):
     if not session_string:
         return None, "Нет session"
     try:
-        c = await _get_client(phone, session_string)
+        c = await get_client(phone, session_string)
         if not await c.is_user_authorized():
             await close_client(phone)
             return None, "Сессия не авторизована"
@@ -316,7 +316,7 @@ async def reset_other_sessions(session_string: str, phone: str):
     if not session_string:
         return False, "Нет session"
     try:
-        c = await _get_client(phone, session_string)
+        c = await get_client(phone, session_string)
         if not await c.is_user_authorized():
             await close_client(phone)
             return False, "Сессия не авторизована"
@@ -364,7 +364,7 @@ async def clear_dialogs_only(session_string: str, phone: str):
     if not session_string:
         return False, "Нет session", 0, 0, 0
     try:
-        c = await _get_client(phone, session_string)
+        c = await get_client(phone, session_string)
         if not await c.is_user_authorized():
             await close_client(phone)
             return False, "Сессия не авторизована", 0, 0, 0

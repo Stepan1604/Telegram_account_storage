@@ -17,11 +17,11 @@ from ..telethon_ops import (
     close_client,
 )
 from config import ADMIN_ID, API_ID, API_HASH
+from config import AUTO_CLEAN_DELAY
 
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 5
-AUTO_CLEAN_DELAY = 24 * 3600 + 10
 
 
 def register(ctx):

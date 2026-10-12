@@ -7,6 +7,9 @@ from datetime import datetime
 import telebot
 from telebot.async_telebot import AsyncTeleBot
 
+from bot.handlers import register_handlers
+from bot.middlewares import AdminMiddleware
+
 from config import BOT_TOKEN, ADMIN_ID, ADMINS
 
 logger = logging.getLogger("runner")
@@ -113,6 +116,10 @@ async def main():
     except Exception as e:
         logger.exception(f"❌ Ошибка БД: {e}")
         return
+
+    # 2.5) Middleware — ДО регистрации хендлеров
+    bot.setup_middleware(AdminMiddleware())
+    logger.info("✅ Middleware зарегистрирован")
 
     # 3) Регистрация хендлеров
     register_handlers(bot)

@@ -24,11 +24,11 @@ from ..telethon_ops import (
     set_session_ttl,
 )
 from config import SESSION_TTL_DAYS
+from config import AUTO_CLEAN_DELAY
 
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 5
-AUTO_CLEAN_DELAY = 24 * 3600 + 10
 
 
 def register(ctx):
@@ -478,10 +478,10 @@ def register(ctx):
         )
 
         # Берём клиент через кэш telethon_ops
-        from ..telethon_ops import _get_client
+        from ..telethon_ops import get_client
 
         try:
-            c = await _get_client(acc.phone, acc.session)
+            c = await get_client(acc.phone, acc.session)
             if not await c.is_user_authorized():
                 await edit_or_send(
                     bot, call,

@@ -23,7 +23,7 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 BACKUP_FILE = "data/accounts_backup.json"
-KEY_FILE = "secret.key"
+KEY_FILE = "data/secret.key"
 
 
 def _to_sync(url: str) -> str:
@@ -102,6 +102,7 @@ def _get_fernet() -> Fernet:
     if not key:
         key = Fernet.generate_key()
         try:
+            os.makedirs(os.path.dirname(KEY_FILE) or ".", exist_ok=True)
             with open(KEY_FILE, "wb") as f:
                 f.write(key)
             logger.warning(
@@ -175,7 +176,7 @@ class Account(Base):
     phone = Column(String(32), unique=True, index=True, nullable=False)
     name = Column(String(64), default="")
     session = Column(EncryptedText, nullable=False)
-    two_fa = Column(Text, default="")
+    two_fa = Column(EncryptedText, default="")
     registered_at = Column(DateTime, default=datetime.now)
     status = Column(String(16), default="uncleaned")
 
@@ -270,11 +271,13 @@ def save_backup() -> None:
         with scope() as s:
             accounts = s.query(Account).filter(Account.deleted_at.is_(None)).all()
             data = [_account_to_dict(a) for a in accounts]
+
+        os.makedirs(os.path.dirname(BACKUP_FILE) or ".", exist_ok=True)
         tmp = BACKUP_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, BACKUP_FILE)
-        logger.info(f"💾 Бэкап сохранён ({len(data)} аккаунтов)")
+        logger.info(f"💾 Бэкап сохранён ({len(data)} аккаунтов, plaintext)")
     except Exception as e:
         logger.error(f"❌ Ошибка бэкапа: {type(e).__name__}: {e}")
         logger.debug(traceback.format_exc())
@@ -284,9 +287,32 @@ def load_backup() -> list:
     if not os.path.exists(BACKUP_FILE):
         return []
     try:
-        with open(BACKUP_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
+        with open(BACKUP_FILE, "rb") as f:
+            raw = f.read()
+
+        if not raw.strip():
+            return []
+
+        # 1) Пробуем как обычный JSON (plaintext)
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
+
+        # 2) Fallback — старый зашифрованный бэкап
+        try:
+            decrypted = _get_fernet().decrypt(raw).decode("utf-8")
+            data = json.loads(decrypted)
+            logger.warning(
+                "[backup] Обнаружен зашифрованный бэкап — читаю через Fernet. "
+                "При следующем сохранении он станет plaintext."
+            )
+            return data
+        except (InvalidToken, Exception):
+            pass
+
+        logger.error("❌ Бэкап не читается ни как JSON, ни как Fernet")
+        return []
     except Exception as e:
         logger.error(f"❌ Ошибка чтения бэкапа: {e}")
         return []
@@ -411,6 +437,32 @@ def _migrate_encrypt_sessions() -> None:
         logger.error(f"❌ _migrate_encrypt_sessions: {type(e).__name__}: {e}")
         logger.debug(traceback.format_exc())
 
+def _migrate_encrypt_two_fa() -> None:
+    """Шифрует plaintext two_fa у существующих записей."""
+    try:
+        f = _get_fernet()
+        with engine.begin() as conn:
+            rows = conn.execute(
+                text("SELECT id, two_fa FROM accounts WHERE two_fa IS NOT NULL AND two_fa != ''")
+            ).fetchall()
+
+        to_encrypt = [
+            (r[0], r[1]) for r in rows
+            if isinstance(r[1], str) and not r[1].startswith(FERNET_MARKER)
+        ]
+        if not to_encrypt:
+            return
+
+        with engine.begin() as conn:
+            for row_id, raw in to_encrypt:
+                enc = f.encrypt(raw.encode("utf-8")).decode("ascii")
+                conn.execute(
+                    text("UPDATE accounts SET two_fa = :s WHERE id = :id"),
+                    {"s": enc, "id": row_id},
+                )
+        logger.info(f"🔐 Зашифровано two_fa: {len(to_encrypt)}")
+    except Exception as e:
+        logger.error(f"❌ _migrate_encrypt_two_fa: {type(e).__name__}: {e}")
 
 def init_db() -> None:
     # Инициализируем ключ шифрования ДО первого чтения/записи
@@ -429,6 +481,7 @@ def init_db() -> None:
 
     _migrate()
     _migrate_encrypt_sessions()
+    _migrate_encrypt_two_fa()
 
     restored = restore_from_backup()
     if restored == 0:

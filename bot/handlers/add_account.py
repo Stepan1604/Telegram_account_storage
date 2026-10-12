@@ -342,14 +342,10 @@ def register(ctx):
             logger.error(f"[db] get_account_by_phone: {type(e).__name__}: {e}")
 
         if not acc:
-            logger.error(f"[finalize] {phone} НЕ сохранён в БД: "
-                         f"{db_error or 'неизвестно'}")
-            try:
-                await bot.send_message(
-                    ADMIN_ID_DUMMY,   # заменяется ниже
-                )
-            except Exception:
-                pass
+            logger.error(
+                f"[finalize] {phone} НЕ сохранён в БД: "
+                f"{db_error or 'неизвестно'}"
+            )
             await bot.send_message(
                 message.chat.id,
                 "❌ НЕ УДАЛОСЬ СОХРАНИТЬ АККАУНТ В БД\n\n"
