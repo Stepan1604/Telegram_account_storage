@@ -3,8 +3,6 @@ import logging
 from datetime import datetime
 
 from telebot import types
-from telethon import TelegramClient
-from telethon.sessions import StringSession
 
 import database as db
 from .. import keyboards as kbd
@@ -15,9 +13,10 @@ from ..telethon_ops import (
     reset_other_sessions,
     clear_dialogs_only,
     close_client,
+    make_client,
+    _safe_disconnect,
 )
-from config import ADMIN_ID, API_ID, API_HASH
-from config import AUTO_CLEAN_DELAY
+from config import ADMIN_ID, AUTO_CLEAN_DELAY
 
 logger = logging.getLogger(__name__)
 
@@ -152,30 +151,32 @@ def register(ctx):
         for i, acc in enumerate(accounts, 1):
             name = acc.name or acc.phone
             icon, txt = "⏳", ""
+            c = None
 
             try:
-                c = TelegramClient(StringSession(acc.session),
-                                   API_ID, API_HASH)
+                c = make_client(acc.session)
                 await asyncio.wait_for(c.connect(), timeout=15)
 
                 if not await c.is_user_authorized():
                     fail += 1
                     icon, txt = "❌", "не авторизована"
-                    await c.disconnect()
                     db.update_last_checked(acc.id, alive=False)
                 else:
                     await asyncio.wait_for(c.get_me(), timeout=10)
-                    await c.disconnect()
                     ok += 1
                     icon, txt = "✅", "активен"
                     db.update_last_checked(acc.id, alive=True)
 
             except asyncio.TimeoutError:
-                fail += 1; icon, txt = "⏱", "таймаут"
+                fail += 1
+                icon, txt = "⏱", "таймаут"
             except Exception as e:
                 fail += 1
                 icon, txt = "⚠️", f"{type(e).__name__}"
                 logger.error(f"[warmup] {acc.phone}: {type(e).__name__}: {e}")
+            finally:
+                if c:
+                    await _safe_disconnect(c)
 
             detail.append(f"{icon} {name} ({acc.phone}) — {txt}")
 

@@ -1,6 +1,5 @@
 import logging
 import traceback
-from datetime import datetime
 
 from telebot import types
 
@@ -18,10 +17,9 @@ from ..telethon_ops import (
     confirm_code,
     confirm_2fa,
     set_2fa_password,
-    set_session_ttl,
-    close_client,
+    _safe_disconnect,
 )
-from config import PASSWORD_2FA, SESSION_TTL_DAYS
+from config import PASSWORD_2FA
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +55,6 @@ def register(ctx):
             "🏷 Введите название аккаунта (до 64 символов).\n\n"
             "Или отправьте «-», чтобы использовать номер."
             f"{auto_note}"
-            f"\n📆 TTL сессий: {SESSION_TTL_DAYS} дней."
         )
         await edit_or_send(bot, call, text, kbd.cancel())
 
@@ -208,14 +205,13 @@ def register(ctx):
         await _finalize_add(message, uid, data, session, two_fa_value)
 
     # ═══════════════════════════════════════════════════════════════════ #
-    #                       ПОСТ-ЛОГИН (2FA + TTL)                          #
+    #                       ПОСТ-ЛОГИН (только 2FA)                         #
     # ═══════════════════════════════════════════════════════════════════ #
 
     async def _apply_post_login(message, data, password_used: str):
         """
         После успешного входа:
-          1. Устанавливает/меняет 2FA-пароль на PASSWORD_2FA из config.
-          2. Устанавливает TTL (SESSION_TTL_DAYS).
+          Устанавливает/меняет 2FA-пароль на PASSWORD_2FA из config.
         Возвращает (session, two_fa_value).
         НИКОГДА не бросает исключение наружу — все ошибки логируются и
         сообщаются пользователю, но сохранение продолжается.
@@ -268,25 +264,6 @@ def register(ctx):
                         )
             except Exception as e:
                 logger.error(f"[auto_2fa] {data['phone']}: "
-                             f"{type(e).__name__}: {e}")
-
-        # ── TTL ──
-        if SESSION_TTL_DAYS and SESSION_TTL_DAYS > 0:
-            try:
-                st, msg_t = await set_session_ttl(
-                    data["client"], SESSION_TTL_DAYS
-                )
-                if st:
-                    logger.info(f"[set_ttl] {data['phone']}: "
-                                f"TTL={SESSION_TTL_DAYS}д")
-                else:
-                    logger.warning(f"[set_ttl] {data['phone']}: {msg_t}")
-                    await bot.send_message(
-                        message.chat.id,
-                        f"⚠️ TTL не установлен: {msg_t}",
-                    )
-            except Exception as e:
-                logger.error(f"[set_ttl] {data['phone']}: "
                              f"{type(e).__name__}: {e}")
 
         # Пересохраняем session (после edit_2fa она меняется)
@@ -342,16 +319,18 @@ def register(ctx):
             logger.error(f"[db] get_account_by_phone: {type(e).__name__}: {e}")
 
         if not acc:
-            logger.error(
-                f"[finalize] {phone} НЕ сохранён в БД: "
-                f"{db_error or 'неизвестно'}"
-            )
+            logger.error(f"[finalize] {phone} НЕ сохранён в БД: "
+                         f"{db_error or 'неизвестно'}")
             await bot.send_message(
                 message.chat.id,
                 "❌ НЕ УДАЛОСЬ СОХРАНИТЬ АККАУНТ В БД\n\n"
                 f"📞 {phone}\n\n"
                 f"Ошибка: {db_error or 'аккаунт не найден'}",
             )
+            # Закрываем подвисший клиент
+            client = data.get("client")
+            if client:
+                await _safe_disconnect(client)
             ctx.pending_signins.pop(uid, None)
             ctx.pending_names.pop(uid, None)
             ctx.user_state.pop(uid, None)
@@ -359,7 +338,11 @@ def register(ctx):
 
         # ── Успех ──
         logger.info(f"[finalize] {phone}: сохранён id={acc.id}")
-        await close_client(phone)
+
+        # Закрываем клиент добавления (он не в кэше _clients)
+        client = data.get("client")
+        if client:
+            await _safe_disconnect(client)
 
         # Планируем автоочистку
         if ctx.schedule_auto_clean:
@@ -388,7 +371,6 @@ def register(ctx):
             f"📞 Номер:    {phone}\n"
             f"🌍 Страна:   {country_label(phone)}\n"
             f"{two_fa_line}\n"
-            f"📆 TTL:      {SESSION_TTL_DAYS} дней\n"
             "📌 Статус:   ⚠️ Ожидает очистки"
         )
         markup = kbd.kb([

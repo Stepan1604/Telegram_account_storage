@@ -319,29 +319,43 @@ def load_backup() -> list:
 
 
 def restore_from_backup() -> int:
+    """
+    Дополняет БД аккаунтами из бэкапа.
+    Восстанавливает только те номера, которых НЕТ в БД.
+    Существующие аккаунты не трогает.
+    """
     data = load_backup()
     if not data:
         return 0
+
+    restored = 0
     try:
         with scope() as s:
-            if s.query(Account).filter(Account.deleted_at.is_(None)).count() > 0:
-                return 0
-            restored = 0
+            existing_phones = {row[0] for row in s.query(Account.phone).all()}
+            logger.info(f"[restore] В БД: {len(existing_phones)}, "
+                        f"в бэкапе: {len(data)}")
+
             for item in data:
                 try:
                     phone = normalize_phone(item.get("phone", ""))
                     session = item.get("session", "")
                     if not phone or not session:
                         continue
+
+                    if phone in existing_phones:
+                        continue
+
                     reg = item.get("registered_at")
                     try:
-                        reg_dt = datetime.fromisoformat(reg) if reg else datetime.now()
+                        reg_dt = (datetime.fromisoformat(reg)
+                                  if reg else datetime.now())
                     except Exception:
                         reg_dt = datetime.now()
+
                     s.add(Account(
                         phone=phone,
                         name=item.get("name") or phone,
-                        session=session,   # ORM зашифрует
+                        session=session,
                         two_fa=item.get("two_fa", "") or "",
                         registered_at=reg_dt,
                         status=item.get("status", "uncleaned") or "uncleaned",
@@ -351,14 +365,20 @@ def restore_from_backup() -> int:
                         lzt_item_id=item.get("lzt_item_id"),
                         favorite=item.get("favorite", 0) or 0,
                     ))
+                    existing_phones.add(phone)
                     restored += 1
+                    logger.info(f"[restore] + {phone}")
                 except Exception as e:
-                    logger.warning(f"⚠️ Запись пропущена: {e}")
+                    logger.warning(f"⚠️ Запись {item.get('phone')} "
+                                   f"пропущена: {e}")
     except Exception as e:
         logger.error(f"❌ restore_from_backup: {e}")
         return 0
+
     if restored:
         logger.info(f"♻️ Восстановлено из бэкапа: {restored}")
+    else:
+        logger.info("[restore] Нечего восстанавливать")
     return restored
 
 
@@ -584,20 +604,37 @@ def get_account_by_phone(phone: str):
 
 
 def delete_account(account_id: int) -> bool:
+    """
+    ПОЛНОЕ удаление: убирает аккаунт из БД И из бэкапа.
+    Используется, когда аккаунт удаляет сам бот (кнопка "Удалить").
+    """
     with scope() as s:
         acc = s.get(Account, account_id)
         if acc:
             s.delete(acc)
-    save_backup()
+    save_backup()          # ← важно: перезаписываем бэкап
     return True
 
+def delete_account_soft(account_id: int) -> bool:
+    """
+    МЯГКОЕ удаление: убирает аккаунт ТОЛЬКО из БД.
+    В бэкапе он остаётся, поэтому при следующем старте бота
+    restore_from_backup() вернёт его обратно.
+
+    Используется, когда аккаунт удаляют вручную через SQL
+    (или когда нужно временно скрыть).
+    """
+    with scope() as s:
+        acc = s.get(Account, account_id)
+        if acc:
+            s.delete(acc)
+    return True
 
 def archive_account(account_id: int) -> bool:
     with scope() as s:
         acc = s.get(Account, account_id)
         if acc:
             acc.deleted_at = datetime.now()
-    save_backup()
     return True
 
 
@@ -606,7 +643,6 @@ def restore_account(account_id: int) -> bool:
         acc = s.get(Account, account_id)
         if acc:
             acc.deleted_at = None
-    save_backup()
     return True
 
 

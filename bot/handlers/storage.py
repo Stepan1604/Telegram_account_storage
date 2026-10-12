@@ -1,7 +1,7 @@
 import asyncio
 import io
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from telebot import types
 
@@ -21,9 +21,7 @@ from ..telethon_ops import (
     read_login_code,
     get_account_info,
     close_client,
-    set_session_ttl,
 )
-from config import SESSION_TTL_DAYS
 from config import AUTO_CLEAN_DELAY
 
 logger = logging.getLogger(__name__)
@@ -211,8 +209,7 @@ def register(ctx):
             f"{checked_line}"
             f"{cleaned_line}"
             f"{auto_line}\n\n"
-            "⏳ Загружаю профиль Telegram...\n\n"
-            f"📆 TTL сессии: {SESSION_TTL_DAYS} дней"
+            "⏳ Загружаю профиль Telegram..."
         )
         await edit_or_send(bot, call, text, kbd.account_card(acc, page))
 
@@ -450,81 +447,6 @@ def register(ctx):
             "💡 Выберите новый статус:"
         )
         await edit_or_send(bot, call, text, kbd.status_menu(acc_id, page))
-
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                        УСТАНОВИТЬ TTL 12 МЕС                          #
-    # ═══════════════════════════════════════════════════════════════════ #
-
-    @bot.callback_query_handler(func=lambda c: c.data.startswith("acc_ttl_"))
-    @admin_required
-    async def cb_acc_ttl(call: types.CallbackQuery):
-        await bot.answer_callback_query(call.id, "⏳ Устанавливаю TTL...")
-        try:
-            _, _, acc_id, page = call.data.split("_")
-            acc_id, page = int(acc_id), int(page)
-        except (ValueError, IndexError):
-            return
-
-        acc = db.get_account(acc_id)
-        if not acc:
-            await edit_or_send(bot, call, "❌ Аккаунт не найден")
-            return
-
-        await edit_or_send(
-            bot, call,
-            "⏳ Устанавливаю TTL...\n\n"
-            f"📞 {acc.phone}\n"
-            f"📆 Срок: {SESSION_TTL_DAYS} дней (12 месяцев)",
-        )
-
-        # Берём клиент через кэш telethon_ops
-        from ..telethon_ops import get_client
-
-        try:
-            c = await get_client(acc.phone, acc.session)
-            if not await c.is_user_authorized():
-                await edit_or_send(
-                    bot, call,
-                    "❌ Сессия не авторизована.\n\n"
-                    f"📞 {acc.phone}",
-                    kbd.back_main(),
-                )
-                return
-
-            ok, msg = await set_session_ttl(c, SESSION_TTL_DAYS)
-
-            if ok:
-                db.log_action(
-                    call.from_user.id, "set_ttl",
-                    details=f"{acc.phone} → {SESSION_TTL_DAYS}д",
-                    account_id=acc.id,
-                )
-                text = (
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "✅ TTL УСТАНОВЛЕН\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"📞 {acc.phone}\n"
-                    f"📆 Срок: {SESSION_TTL_DAYS} дней (12 месяцев)\n\n"
-                    "💡 Если аккаунт не заходить 12 месяцев —\n"
-                    "Telegram автоматически удалит его."
-                )
-            else:
-                text = (
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "❌ НЕ УДАЛОСЬ УСТАНОВИТЬ TTL\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"📞 {acc.phone}\n\n"
-                    f"Ошибки: {msg}"
-                )
-        except Exception as e:
-            logger.error(f"[cb_acc_ttl] {type(e).__name__}: {e}")
-            text = f"❌ Ошибка: {type(e).__name__}"
-
-        markup = kbd.kb([
-            [kbd.btn("🔙 К АККАУНТУ", f"acc_view_{acc_id}_{page}")],
-            [kbd.btn("🏠 МЕНЮ", "main_menu")],
-        ])
-        await edit_or_send(bot, call, text, markup)
 
     # ═══════════════════════════════════════════════════════════════════ #
     #                        УДАЛЕНИЕ АККАУНТА                              #

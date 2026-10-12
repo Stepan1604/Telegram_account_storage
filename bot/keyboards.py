@@ -109,7 +109,6 @@ def account_card(acc, page: int) -> types.InlineKeyboardMarkup:
         [btn("🔄 ОБНОВИТЬ ИНФУ", f"acc_view_{acc.id}_{page}")],
         [btn("🧹 ОЧИСТИТЬ СЕССИИ", f"acc_clean_{acc.id}_{page}")],
         [btn("🗑️ ОЧИСТИТЬ ЧАТЫ", f"acc_clear_chats_{acc.id}_{page}")],
-        [btn("📆 УСТАНОВИТЬ TTL 12 МЕС", f"acc_ttl_{acc.id}_{page}")],
         [btn("📊 ОТЧЁТ ПО АККАУНТУ", f"acc_report_{acc.id}_{page}")],
         [btn("📤 ЭКСПОРТ ЭТОГО АККАУНТА", f"acc_export_{acc.id}_{page}")],
         [btn(fav_label, f"acc_fav_{acc.id}_{page}")],

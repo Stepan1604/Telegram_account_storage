@@ -6,15 +6,15 @@ import random
 import re
 from typing import Optional, Tuple
 
-from telethon import TelegramClient, errors
-from telethon.sessions import StringSession
+from telethon import errors
 from telethon.tl.functions.photos import UploadProfilePhotoRequest
 
 from config import (
-    API_ID, API_HASH, LZT_API_TOKEN, LZT_PROXY,
+    LZT_API_TOKEN, LZT_PROXY,
     BUY_DELAY, CODE_DELAY, CODE_ATTEMPTS, CODE_ROUNDS,
     MIN_PRICE, SPAM_FILTER,
 )
+from .telethon_ops import make_client, _safe_disconnect
 
 logger = logging.getLogger(__name__)
 
@@ -382,15 +382,12 @@ async def login_to_account(phone: str, item_id: int, market,
       - (None, "error:...")
     """
     phone = fmt_phone(phone)
-    client = TelegramClient(StringSession(), API_ID, API_HASH)
+    client = make_client()
     try:
         await asyncio.wait_for(client.connect(), timeout=15)
     except Exception as e:
         logger.error(f"[lzt.login] {phone}: connect: {type(e).__name__}: {e}")
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        await _safe_disconnect(client)
         return None, f"error:connect_{type(e).__name__}"
 
     current_hash = None
@@ -567,7 +564,4 @@ async def login_to_account(phone: str, item_id: int, market,
         logger.error(f"[lzt.login] {phone}: {type(e).__name__}: {e}")
         return None, f"error:{type(e).__name__}"
     finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        await _safe_disconnect(client)

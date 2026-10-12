@@ -22,25 +22,61 @@ logger = logging.getLogger(__name__)
 #                          КЭШ КЛИЕНТОВ                                        #
 # --------------------------------------------------------------------------- #
 
-_clients: dict = {}
+_clients: dict = {}          # phone -> TelegramClient (кэш)
+_all_clients: set = set()    # все созданные клиенты (для shutdown)
 _lock = asyncio.Lock()
+
+
+def make_client(session_string: str = "") -> TelegramClient:
+    """
+    Единая точка создания TelegramClient.
+    Регистрирует клиент в _all_clients, чтобы потом можно было
+    гарантированно закрыть его при выходе.
+    """
+    c = TelegramClient(StringSession(session_string), API_ID, API_HASH)
+    _all_clients.add(c)
+    return c
+
+
+async def _safe_disconnect(c: TelegramClient) -> None:
+    """Отключает клиент, не давая event loop отменить операцию."""
+    _all_clients.discard(c)
+    try:
+        await asyncio.shield(c.disconnect())
+    except Exception as e:
+        logger.warning(f"[disconnect] {type(e).__name__}: {e}")
+
+
+async def shutdown_all_clients() -> None:
+    """
+    Жёсткое закрытие ВСЕХ клиентов.
+    Вызывать в самом конце работы бота, пока loop ещё жив.
+    """
+    clients = list(_all_clients)
+    if not clients:
+        logger.info("🔌 Нет активных Telethon-клиентов")
+        return
+    logger.info(f"🔌 Закрываю {len(clients)} Telethon-клиентов...")
+    await asyncio.gather(
+        *(_safe_disconnect(c) for c in clients),
+        return_exceptions=True,
+    )
+    _all_clients.clear()
+    logger.info("✅ Все Telethon-клиенты закрыты")
 
 
 # ═══════════════════════════════════════════════════════════════════════════ #
 #                          УПРАВЛЕНИЕ КЛИЕНТАМИ                                #
 # ═══════════════════════════════════════════════════════════════════════════ #
 
-async def get_client(phone: str, session_string: str) -> TelegramClient:
+async def _get_client(phone: str, session_string: str) -> TelegramClient:
     async with _lock:
         c = _clients.get(phone)
         if c and c.is_connected():
             return c
         if c:
-            try:
-                await c.disconnect()
-            except Exception as e:
-                logger.warning(f"[client] disconnect {phone}: {e}")
-        c = TelegramClient(StringSession(session_string), API_ID, API_HASH)
+            await _safe_disconnect(c)
+        c = make_client(session_string)
         await asyncio.wait_for(c.connect(), timeout=15)
         _clients[phone] = c
         return c
@@ -50,13 +86,11 @@ async def close_client(phone: str) -> None:
     async with _lock:
         c = _clients.pop(phone, None)
     if c:
-        try:
-            await c.disconnect()
-        except Exception as e:
-            logger.warning(f"[client] disconnect {phone}: {e}")
+        await _safe_disconnect(c)
 
 
 async def close_all_clients() -> None:
+    """Совместимость: закрывает кэшированные клиенты."""
     for phone in list(_clients.keys()):
         await close_client(phone)
 
@@ -69,7 +103,7 @@ async def is_alive(session_string: str, phone: str):
     if not session_string:
         return False, "Нет session"
     try:
-        c = await get_client(phone, session_string)
+        c = await _get_client(phone, session_string)
         if not await asyncio.wait_for(c.is_user_authorized(), timeout=10):
             await close_client(phone)
             return False, "Сессия не авторизована"
@@ -94,7 +128,7 @@ async def read_login_code(session_string: str, phone: str):
     if not session_string:
         return None, "Нет session"
     try:
-        c = await get_client(phone, session_string)
+        c = await _get_client(phone, session_string)
         if not await c.is_user_authorized():
             await close_client(phone)
             return None, "Сессия не авторизована"
@@ -126,7 +160,7 @@ async def get_account_info(session_string: str, phone: str) -> dict:
         result["error"] = "Нет session"
         return result
 
-    client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
+    client = make_client(session_string)
     try:
         await asyncio.wait_for(client.connect(), timeout=15)
         if not await client.is_user_authorized():
@@ -191,10 +225,7 @@ async def get_account_info(session_string: str, phone: str) -> dict:
         logger.error(f"[acc_info] {phone}: {type(e).__name__}: {e}")
         result["error"] = f"Ошибка: {str(e)[:120]}"
     finally:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        await _safe_disconnect(client)
     return result
 
 
@@ -316,7 +347,7 @@ async def reset_other_sessions(session_string: str, phone: str):
     if not session_string:
         return False, "Нет session"
     try:
-        c = await get_client(phone, session_string)
+        c = await _get_client(phone, session_string)
         if not await c.is_user_authorized():
             await close_client(phone)
             return False, "Сессия не авторизована"
@@ -364,7 +395,7 @@ async def clear_dialogs_only(session_string: str, phone: str):
     if not session_string:
         return False, "Нет session", 0, 0, 0
     try:
-        c = await get_client(phone, session_string)
+        c = await _get_client(phone, session_string)
         if not await c.is_user_authorized():
             await close_client(phone)
             return False, "Сессия не авторизована", 0, 0, 0
@@ -396,7 +427,7 @@ async def clear_dialogs_only(session_string: str, phone: str):
 async def start_login(phone: str):
     """Отправляет код. Возвращает (client, phone_code_hash, status)."""
     phone = fmt_phone(phone)
-    client = TelegramClient(StringSession(), API_ID, API_HASH)
+    client = make_client()
     try:
         await asyncio.wait_for(client.connect(), timeout=15)
         sent = await asyncio.wait_for(
@@ -404,35 +435,20 @@ async def start_login(phone: str):
         )
         return client, sent.phone_code_hash, "OK"
     except errors.FloodWaitError as e:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        await _safe_disconnect(client)
         return None, None, f"FloodWait: {e.seconds} сек."
     except errors.PhoneNumberBannedError:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        await _safe_disconnect(client)
         return None, None, "Номер забанен"
     except errors.PhoneNumberInvalidError:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        await _safe_disconnect(client)
         return None, None, "Неверный номер"
     except errors.PhoneNumberFloodError:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        await _safe_disconnect(client)
         return None, None, "Слишком много запросов на номер"
     except Exception as e:
         logger.error(f"[start_login] {phone}: {type(e).__name__}: {e}")
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        await _safe_disconnect(client)
         return None, None, f"Ошибка: {str(e)[:200]}"
 
 
@@ -494,22 +510,4 @@ async def set_2fa_password(client, new_password: str,
         return False, "Неверный текущий пароль 2FA"
     except Exception as e:
         logger.error(f"[set_2fa]: {type(e).__name__}: {e}")
-        return False, f"{type(e).__name__}: {str(e)[:150]}"
-
-
-async def set_session_ttl(client, days: int = 365):
-    """Устанавливает TTL — через сколько дней неактивности Telegram удалит сессии."""
-    try:
-        days = max(1, min(int(days), 366))
-        await asyncio.wait_for(
-            client(functions.account.SetAccountTTLRequest(
-                ttl=AccountDaysTTL(days=days)
-            )),
-            timeout=15,
-        )
-        return True, "OK"
-    except errors.FloodWaitError as e:
-        return False, f"FloodWait: {e.seconds} сек."
-    except Exception as e:
-        logger.error(f"[set_ttl]: {type(e).__name__}: {e}")
         return False, f"{type(e).__name__}: {str(e)[:150]}"

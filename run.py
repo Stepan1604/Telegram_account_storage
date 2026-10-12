@@ -7,9 +7,6 @@ from datetime import datetime
 import telebot
 from telebot.async_telebot import AsyncTeleBot
 
-from bot.handlers import register_handlers
-from bot.middlewares import AdminMiddleware
-
 from config import BOT_TOKEN, ADMIN_ID, ADMINS
 
 logger = logging.getLogger("runner")
@@ -52,7 +49,8 @@ if ADMIN_ID not in ADMINS:
 
 bot = AsyncTeleBot(BOT_TOKEN)
 
-from bot.handlers import register_handlers  # noqa: E402
+from bot.handlers import register_handlers            # noqa: E402
+from bot.middlewares import AdminMiddleware           # noqa: E402
 
 
 # ═══════════════════════════════════════════════════════════════════════════ #
@@ -64,6 +62,9 @@ def check_encryption_key():
     try:
         if os.path.exists("data/secret.key"):
             size = os.path.getsize("data/secret.key")
+            logger.info(f"🔐 Шифрование session включено (secret.key, {size} байт)")
+        elif os.path.exists("secret.key"):
+            size = os.path.getsize("secret.key")
             logger.info(f"🔐 Шифрование session включено (secret.key, {size} байт)")
         else:
             logger.warning(
@@ -95,6 +96,49 @@ async def notify_startup():
             logger.warning(f"Не отправлено {admin_id}: {e}")
 
 
+async def shutdown_all() -> None:
+    """
+    Корректное завершение: закрываем все Telethon-клиенты,
+    даём event loop'у досчитать оставшиеся задачи, закрываем БД.
+    """
+    # 1) Закрываем ВСЕ Telethon-клиенты
+    try:
+        from bot.telethon_ops import shutdown_all_clients
+        await asyncio.shield(shutdown_all_clients())
+    except Exception as e:
+        logger.warning(f"⚠️ shutdown_all_clients: {e}")
+
+    # 2) Даём loop'у цикл, чтобы внутренние Task'и Telethon
+    #    (_send_loop, _recv_loop) успели завершиться
+    try:
+        await asyncio.sleep(0.5)
+    except Exception:
+        pass
+
+    # 3) Прибиваем оставшиеся задачи (если есть)
+    try:
+        current = asyncio.current_task()
+        pending = [t for t in asyncio.all_tasks()
+                   if t is not current and not t.done()]
+        if pending:
+            logger.info(f"⏳ Ожидаю завершения {len(pending)} задач...")
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            logger.info("✅ Все фоновые задачи завершены")
+    except Exception as e:
+        logger.warning(f"⚠️ Ожидание задач: {e}")
+
+    # 4) Закрываем БД
+    try:
+        import database as db
+        db.Session.remove()
+        db.engine.dispose()
+        logger.info("✅ БД закрыта")
+    except Exception as e:
+        logger.warning(f"⚠️ Закрытие БД: {e}")
+
+
 # ═══════════════════════════════════════════════════════════════════════════ #
 #                              ЗАПУСК                                          #
 # ═══════════════════════════════════════════════════════════════════════════ #
@@ -117,22 +161,25 @@ async def main():
         logger.exception(f"❌ Ошибка БД: {e}")
         return
 
-    # 2.5) Middleware — ДО регистрации хендлеров
-    bot.setup_middleware(AdminMiddleware())
-    logger.info("✅ Middleware зарегистрирован")
+    # 3) Middleware — ДО регистрации хендлеров
+    try:
+        bot.setup_middleware(AdminMiddleware())
+        logger.info("✅ Middleware зарегистрирован")
+    except Exception as e:
+        logger.warning(f"⚠️ Middleware: {e}")
 
-    # 3) Регистрация хендлеров
+    # 4) Регистрация хендлеров
     register_handlers(bot)
     logger.info("✅ Хендлеры зарегистрированы")
 
-    # 4) Уведомление админов
+    # 5) Уведомление админов
     try:
         await notify_startup()
         logger.info("✅ Уведомление отправлено")
     except Exception as e:
         logger.warning(f"⚠️ Уведомление: {e}")
 
-    # 5) Polling
+    # 6) Polling
     logger.info("✅ Polling...")
     try:
         await bot.infinity_polling(
@@ -143,6 +190,9 @@ async def main():
         )
     except Exception as e:
         logger.exception(f"❌ Polling: {e}")
+    finally:
+        logger.info("🛑 Завершение работы...")
+        await shutdown_all()
 
 
 def run():
@@ -152,13 +202,6 @@ def run():
         logger.info("🛑 Остановлен")
     except Exception as e:
         logger.exception(f"❌ Критическая ошибка: {e}")
-    finally:
-        try:
-            import database as db
-            db.Session.remove()
-            db.engine.dispose()
-        except Exception:
-            pass
 
 
 if __name__ == "__main__":
