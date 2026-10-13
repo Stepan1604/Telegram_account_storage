@@ -4,7 +4,6 @@
 покупкой через LZT Market и экспортом в CSV.
 
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
