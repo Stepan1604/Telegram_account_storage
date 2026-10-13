@@ -234,7 +234,7 @@ def register(ctx):
         if actions:
             actions_block = "\n📜 Последние действия:\n" + "\n".join(
                 f"  • {a.created_at.strftime('%d.%m %H:%M')} "
-                f"`{a.action}`"
+                f"{a.action}"
                 + (f" · {a.details[:40]}" if a.details else "")
                 for a in actions[:8]
             )
@@ -316,7 +316,7 @@ def register(ctx):
             for a in actions:
                 ts = a.created_at.strftime("%d.%m %H:%M")
                 det = f" · {a.details[:60]}" if a.details else ""
-                lines.append(f"{ts} · `{a.action}`{det}")
+                lines.append(f"{ts} · {a.action}{det}")
 
             text = (
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"

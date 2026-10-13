@@ -194,8 +194,28 @@ def register(ctx):
         name_display = acc.name or acc.phone
         star_mark = " ⭐" if (acc.favorite or 0) == 1 else ""
 
-        # Базовая карточка (без Telegram-инфо) — показываем сразу
-        text = (
+        # ── Функция-сборщик текста ──
+        def _build_text(profile_block: str = "") -> str:
+            return (
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "📱 ИНФОРМАЦИЯ ОБ АККАУНТЕ\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"🏷 Название: {name_display}{star_mark}\n"
+                    f"📞 Номер:    {acc.phone}\n"
+                    f"🌍 Страна:   {country_label(acc.phone)}\n"
+                    f"📆 Добавлен: {date_str}\n"
+                    f"🔐 2FA:      {two_fa}\n"
+                    f"📌 Статус:   {status_label(acc.status)}"
+                    f"{source_line}\n\n"
+                    f"👤 ПРОФИЛЬ TELEGRAM\n"
+                    + profile_block
+                    + f"{checked_line}"
+                      f"{cleaned_line}"
+                      f"{auto_line}"
+            )
+
+        # ── 1. Показываем заглушку ──
+        placeholder = (
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "📱 ИНФОРМАЦИЯ ОБ АККАУНТЕ\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -205,35 +225,22 @@ def register(ctx):
             f"📆 Добавлен: {date_str}\n"
             f"🔐 2FA:      {two_fa}\n"
             f"📌 Статус:   {status_label(acc.status)}"
-            f"{source_line}"
-            f"{checked_line}"
-            f"{cleaned_line}"
-            f"{auto_line}\n\n"
+            f"{source_line}\n\n"
             "⏳ Загружаю профиль Telegram..."
         )
-        await edit_or_send(bot, call, text, kbd.account_card(acc, page))
+        await edit_or_send(bot, call, placeholder, kbd.account_card(acc, page))
 
-        # Подгружаем детали из Telegram
+        # ── 2. Подгружаем инфо ──
         info = await get_account_info(acc.session, acc.phone)
 
         if not info["ok"]:
-            text = text.replace(
-                "⏳ Загружаю профиль Telegram...\n\n", ""
-            )
-            text += f"\n\n⚠️ Профиль: {info['error']}"
+            profile_block = f"  ⚠️ Ошибка: {info['error']}\n"
         else:
             first = info["first_name"] or "—"
             last = info["last_name"] or ""
             full_name = f"{first} {last}".strip() or "—"
             uname = info["username"] or "нет"
-
-            text = text.replace(
-                "⏳ Загружаю профиль Telegram...\n\n", ""
-            )
-            text = text.replace(
-                f"📌 Статус:   {status_label(acc.status)}",
-                f"📌 Статус:   {status_label(acc.status)}\n\n"
-                "👤 ПРОФИЛЬ TELEGRAM\n"
+            profile_block = (
                 f"  🏷 Имя:       {full_name}\n"
                 f"  📛 Юзернейм:  {uname}\n"
                 f"  🆔 ID:        {info['user_id']}\n\n"
@@ -242,10 +249,12 @@ def register(ctx):
                 f"  💬 Чатов:     {info['chats']}\n"
                 f"  📢 Каналов:   {info['channels']}\n"
                 f"  👥 Групп:     {info['groups']}\n"
-                f"  📦 Всего:     {info['total_dialogs']}"
+                f"  📦 Всего:     {info['total_dialogs']}\n"
             )
 
-        await edit_or_send(bot, call, text, kbd.account_card(acc, page))
+        # ── 3. Финальный текст ──
+        final_text = _build_text(profile_block)
+        await edit_or_send(bot, call, final_text, kbd.account_card(acc, page))
 
     @bot.callback_query_handler(func=lambda c: c.data.startswith("acc_view_"))
     @admin_required
@@ -312,7 +321,7 @@ def register(ctx):
             [kbd.btn("🔄 ПОВТОРИТЬ", f"acc_code_{acc_id}_{page}")],
             [kbd.btn("🔙 К АККАУНТУ", f"acc_view_{acc_id}_{page}")],
         ])
-        await edit_or_send(bot, call, text, markup)
+        await edit_or_send(bot, call, text, markup, parse_mode="Markdown")
 
     # ═══════════════════════════════════════════════════════════════════ #
     #                          ИЗБРАННОЕ                                    #
