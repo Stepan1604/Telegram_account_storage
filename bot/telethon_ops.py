@@ -18,20 +18,22 @@ from .helpers import fmt_phone
 
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------------- #
-#                          КЭШ КЛИЕНТОВ                                        #
-# --------------------------------------------------------------------------- #
-
-_clients: dict = {}          # phone -> TelegramClient (кэш)
-_all_clients: set = set()    # все созданные клиенты (для shutdown)
+_clients: dict = {}
+_all_clients: set = set()
 _lock = asyncio.Lock()
 
 
 def make_client(session_string: str = "") -> TelegramClient:
     """
-    Единая точка создания TelegramClient.
-    Регистрирует клиент в _all_clients, чтобы потом можно было
-    гарантированно закрыть его при выходе.
+    Создаёт TelegramClient и регистрирует его в глобальном реестре.
+
+    Единая точка создания клиентов. Благодаря регистрации в _all_clients
+    все клиенты могут быть гарантированно закрыты при завершении бота
+    через shutdown_all_clients().
+
+    :param session_string: строка сессии (StringSession). Пустая — для
+        нового входа.
+    :return: экземпляр TelegramClient.
     """
     c = TelegramClient(StringSession(session_string), API_ID, API_HASH)
     _all_clients.add(c)
@@ -39,7 +41,14 @@ def make_client(session_string: str = "") -> TelegramClient:
 
 
 async def _safe_disconnect(c: TelegramClient) -> None:
-    """Отключает клиент, не давая event loop отменить операцию."""
+    """
+    Безопасно отключает клиент, защищая операцию от отмены event loop.
+
+    Использует asyncio.shield, чтобы disconnect не был прерван, если
+    loop завершается. Удаляет клиент из реестра _all_clients.
+
+    :param c: экземпляр TelegramClient для отключения.
+    """
     _all_clients.discard(c)
     try:
         await asyncio.shield(c.disconnect())
@@ -49,8 +58,11 @@ async def _safe_disconnect(c: TelegramClient) -> None:
 
 async def shutdown_all_clients() -> None:
     """
-    Жёсткое закрытие ВСЕХ клиентов.
-    Вызывать в самом конце работы бота, пока loop ещё жив.
+    Закрывает все созданные Telegram-клиенты.
+
+    Вызывается при завершении работы бота, пока event loop ещё активен.
+    Параллельно отключает все клиенты из реестра _all_clients и очищает
+    реестр.
     """
     clients = list(_all_clients)
     if not clients:
@@ -65,11 +77,17 @@ async def shutdown_all_clients() -> None:
     logger.info("✅ Все Telethon-клиенты закрыты")
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                          УПРАВЛЕНИЕ КЛИЕНТАМИ                                #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 async def _get_client(phone: str, session_string: str) -> TelegramClient:
+    """
+    Возвращает клиент из кэша или создаёт новый.
+
+    Кэширует клиенты по номеру телефона. Если в кэше есть клиент, но
+    он отключён, создаёт новый.
+
+    :param phone: номер телефона (ключ кэша).
+    :param session_string: строка сессии.
+    :return: подключённый TelegramClient.
+    """
     async with _lock:
         c = _clients.get(phone)
         if c and c.is_connected():
@@ -83,6 +101,11 @@ async def _get_client(phone: str, session_string: str) -> TelegramClient:
 
 
 async def close_client(phone: str) -> None:
+    """
+    Закрывает и удаляет клиент из кэша по номеру телефона.
+
+    :param phone: номер телефона.
+    """
     async with _lock:
         c = _clients.pop(phone, None)
     if c:
@@ -90,16 +113,28 @@ async def close_client(phone: str) -> None:
 
 
 async def close_all_clients() -> None:
-    """Совместимость: закрывает кэшированные клиенты."""
+    """
+    Закрывает все клиенты из кэша.
+
+    Совместимость с предыдущим API. Для полного закрытия используй
+    shutdown_all_clients().
+    """
     for phone in list(_clients.keys()):
         await close_client(phone)
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                            ПРОВЕРКА / КОД                                    #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 async def is_alive(session_string: str, phone: str):
+    """
+    Проверяет, жива ли сессия аккаунта.
+
+    Подключается по сессии и проверяет авторизацию через is_user_authorized
+    и get_me. При ошибке авторизации/бане/деактивации закрывает клиент и
+    возвращает False.
+
+    :param session_string: строка сессии.
+    :param phone: номер телефона.
+    :return: (bool, str) — (True, имя) при успехе; (False, причина) при ошибке.
+    """
     if not session_string:
         return False, "Нет session"
     try:
@@ -125,6 +160,16 @@ async def is_alive(session_string: str, phone: str):
 
 
 async def read_login_code(session_string: str, phone: str):
+    """
+    Читает код входа из сервисного чата Telegram (777000).
+
+    Подключается по сессии, читает последние 15 сообщений от сервисного
+    аккаунта и ищет 5-значный код.
+
+    :param session_string: строка сессии.
+    :param phone: номер телефона.
+    :return: (str, str) — (код, "OK") при успехе; (None, причина) при ошибке.
+    """
     if not session_string:
         return None, "Нет session"
     try:
@@ -148,7 +193,17 @@ async def read_login_code(session_string: str, phone: str):
 
 
 async def get_account_info(session_string: str, phone: str) -> dict:
-    """Расширенная инфа: профиль + сессии + чаты / каналы / группы."""
+    """
+    Получает расширенную информацию об аккаунте.
+
+    Подключается по сессии и собирает: профиль (имя, юзернейм, ID),
+    количество активных сессий, количество диалогов (чаты/каналы/группы).
+
+    :param session_string: строка сессии.
+    :param phone: номер телефона.
+    :return: словарь с ключами ok, error, first_name, last_name, username,
+        user_id, sessions, chats, channels, groups, total_dialogs.
+    """
     result = {
         "ok": False, "error": "",
         "first_name": "", "last_name": "", "username": "",
@@ -167,7 +222,6 @@ async def get_account_info(session_string: str, phone: str) -> dict:
             result["error"] = "Сессия не авторизована"
             return result
 
-        # 1) Профиль
         try:
             me = await asyncio.wait_for(client.get_me(), timeout=10)
             if me:
@@ -178,7 +232,6 @@ async def get_account_info(session_string: str, phone: str) -> dict:
         except Exception as e:
             logger.warning(f"[acc_info] {phone}: get_me: {e}")
 
-        # 2) Активные сессии
         try:
             from telethon.tl.functions.account import GetAuthorizationsRequest
             auths = await asyncio.wait_for(
@@ -188,7 +241,6 @@ async def get_account_info(session_string: str, phone: str) -> dict:
         except Exception as e:
             logger.warning(f"[acc_info] {phone}: get_authorizations: {e}")
 
-        # 3) Диалоги
         try:
             dialogs = await asyncio.wait_for(
                 client.get_dialogs(limit=None), timeout=30
@@ -229,14 +281,21 @@ async def get_account_info(session_string: str, phone: str) -> dict:
     return result
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                            ОЧИСТКА ДИАЛОГОВ                                  #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 async def clear_all_dialogs(client: TelegramClient, phone: str):
     """
-    Полная очистка: каналы, группы, личные чаты.
-    Возвращает (deleted, failed, total).
+    Полностью очищает диалоги аккаунта: каналы, группы, личные чаты.
+
+    Проходит по всем диалогам и:
+    - выходит из каналов (LeaveChannelRequest),
+    - удаляет себя из групп (DeleteChatUserRequest),
+    - удаляет историю личных чатов (DeleteHistoryRequest),
+    - удаляет сам диалог (delete_dialog).
+
+    Между операциями делает паузу 0.4 сек, чтобы не ловить FloodWait.
+
+    :param client: подключённый TelegramClient.
+    :param phone: номер телефона (для логов).
+    :return: (deleted, failed, total) — сколько обработано, ошибок, всего.
     """
     try:
         dialogs = await client.get_dialogs(limit=None)
@@ -343,7 +402,18 @@ async def clear_all_dialogs(client: TelegramClient, phone: str):
 
 
 async def reset_other_sessions(session_string: str, phone: str):
-    """ResetAuthorizations + полная очистка чатов."""
+    """
+    Завершает все чужие сессии аккаунта и очищает диалоги.
+
+    Выполняет ResetAuthorizationsRequest (закрывает все остальные сессии)
+    и следом очищает все диалоги через clear_all_dialogs.
+
+    :param session_string: строка сессии.
+    :param phone: номер телефона.
+    :return: (bool, str) — (True, "OK ...") при успехе;
+        (False, причина) при ошибке. Особая причина "FROZEN" — аккаунт
+        заморожен Telegram.
+    """
     if not session_string:
         return False, "Нет session"
     try:
@@ -391,7 +461,14 @@ async def reset_other_sessions(session_string: str, phone: str):
 
 
 async def clear_dialogs_only(session_string: str, phone: str):
-    """Только очистка чатов, без сброса сессий."""
+    """
+    Очищает диалоги без сброса сессий.
+
+    :param session_string: строка сессии.
+    :param phone: номер телефона.
+    :return: (bool, str, int, int, int) — (успех, сообщение, удалено,
+        ошибок, всего).
+    """
     if not session_string:
         return False, "Нет session", 0, 0, 0
     try:
@@ -420,12 +497,18 @@ async def clear_dialogs_only(session_string: str, phone: str):
         return False, f"{type(e).__name__}: {str(e)[:150]}", 0, 0, 0
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                             ВХОД В АККАУНТ                                   #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 async def start_login(phone: str):
-    """Отправляет код. Возвращает (client, phone_code_hash, status)."""
+    """
+    Отправляет код подтверждения на указанный номер.
+
+    Создаёт новый клиент, подключается и вызывает send_code_request.
+    Возвращает клиент для дальнейшего ввода кода.
+
+    :param phone: номер телефона.
+    :return: (client, phone_code_hash, status):
+        - (TelegramClient, hash, "OK") при успехе.
+        - (None, None, "причина") при ошибке.
+    """
     phone = fmt_phone(phone)
     client = make_client()
     try:
@@ -453,7 +536,16 @@ async def start_login(phone: str):
 
 
 async def confirm_code(client, phone, phone_code_hash, code):
-    """Ввод кода из Telegram. Возвращает (ok, msg, session)."""
+    """
+    Подтверждает вход кодом из Telegram.
+
+    :param client: активный TelegramClient из start_login.
+    :param phone: номер телефона.
+    :param phone_code_hash: хэш кода из start_login.
+    :param code: код подтверждения из Telegram.
+    :return: (bool, str, str) — (успех, сообщение, session_string).
+        Если нужен 2FA, возвращает (False, "NEED_2FA", None).
+    """
     try:
         await asyncio.wait_for(
             client.sign_in(phone, code, phone_code_hash=phone_code_hash),
@@ -472,7 +564,13 @@ async def confirm_code(client, phone, phone_code_hash, code):
 
 
 async def confirm_2fa(client, password):
-    """Ввод пароля 2FA. Возвращает (ok, msg, session)."""
+    """
+    Подтверждает вход паролем 2FA.
+
+    :param client: активный TelegramClient.
+    :param password: пароль 2FA.
+    :return: (bool, str, str) — (успех, сообщение, session_string).
+    """
     try:
         await asyncio.wait_for(client.sign_in(password=password), timeout=15)
         return True, "OK", client.session.save()
@@ -483,13 +581,19 @@ async def confirm_2fa(client, password):
         return False, str(e)[:200], None
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                             НАСТРОЙКИ АККАУНТА                               #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 async def set_2fa_password(client, new_password: str,
                            current_password: str = None):
-    """Устанавливает или меняет 2FA-пароль."""
+    """
+    Устанавливает или меняет пароль 2FA.
+
+    Если current_password передан — меняет существующий пароль.
+    Если нет — устанавливает новый (для аккаунта без 2FA).
+
+    :param client: активный TelegramClient.
+    :param new_password: новый пароль 2FA.
+    :param current_password: текущий пароль 2FA (если уже установлен).
+    :return: (bool, str) — (успех, сообщение).
+    """
     try:
         if current_password:
             await asyncio.wait_for(

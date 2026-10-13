@@ -8,14 +8,16 @@ logger = logging.getLogger(__name__)
 
 def admin_required(handler):
     """
-    Декоратор для callback_query_handler и message_handler.
-    Пропускает только админов из config.ADMINS.
+    Декоратор для проверки прав администратора.
 
-    Использование:
-        @bot.callback_query_handler(func=lambda c: c.data == "menu")
-        @admin_required
-        async def cb_menu(call):
-            ...
+    Пропускает выполнение хендлера только если user_id из from_user
+    входит в список ADMINS из config.py. Иначе логирует отказ и,
+    если возможно, отправляет пользователю всплывающее уведомление.
+
+    Работает как для message_handler, так и для callback_query_handler.
+
+    :param handler: async-функция хендлера.
+    :return: обёрнутая async-функция.
     """
     @wraps(handler)
     async def wrapper(call_or_message, *args, **kwargs):

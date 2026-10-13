@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from datetime import datetime
 
 from telebot import types
 
@@ -11,34 +10,50 @@ from ..decorators import admin_required
 from ..helpers import (
     edit_or_send,
     safe_edit,
-    country_label,
-    lzt_error_hint,
     fmt_phone,
     get_country_code,
+    lzt_error_hint,
 )
 
 logger = logging.getLogger(__name__)
 
 
 def register(ctx):
+    """
+    Регистрирует хендлеры покупки аккаунтов через LZT Market.
+
+    Включает: меню покупки, одиночную покупку (случайная страна /
+    конкретная страна), оптовую закупку, импорт уже купленных лотов,
+    остановку процесса, FSM ввода страны/цены/количества и функции
+    сохранения купленного в БД.
+
+    :param ctx: объект Context с общим состоянием.
+    """
     bot = ctx.bot
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ПРОВЕРКА ГОТОВНОСТИ LZT                          #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     def _lzt_err() -> str:
+        """
+        Проверяет готовность LZT к работе.
+
+        :return: пустая строка если всё ок, иначе текст ошибки.
+        """
         if not lzt.LZT_AVAILABLE:
             return "LOLZTEAM не установлен: pip install LOLZTEAM"
         if not lzt.LZT_API_TOKEN:
             return "LZT_API_TOKEN не задан в config.py"
         return ""
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                          МЕНЮ ПОКУПКИ                                 #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def _render_buy_menu(chat_id, edit_id=None, call=None):
+        """
+        Рисует меню покупки номеров.
+
+        Если LZT недоступен — показывает сообщение об ошибке.
+        Иначе — список режимов покупки.
+
+        :param chat_id: ID чата.
+        :param edit_id: ID сообщения для редактирования.
+        :param call: callback_query (если вызвано из кнопки).
+        """
         err = _lzt_err()
         if err:
             text = (
@@ -72,17 +87,25 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "buy_menu")
     @admin_required
     async def cb_buy_menu(call: types.CallbackQuery):
+        """
+        Открывает меню покупки номеров.
+
+        :param call: callback_query от кнопки "🛒 КУПИТЬ НОМЕРА".
+        """
         await bot.answer_callback_query(call.id)
         ctx.buy_ctx.pop(call.from_user.id, None)
         await _render_buy_menu(call.message.chat.id, call=call)
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                     FSM: СЛУЧАЙНАЯ СТРАНА                             #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.callback_query_handler(func=lambda c: c.data == "buy_single_random")
     @admin_required
     async def cb_buy_single_random(call: types.CallbackQuery):
+        """
+        Запускает покупку одного лота со случайной страной.
+
+        Переводит пользователя в состояние buy_price.
+
+        :param call: callback_query от кнопки "🎲 СЛУЧАЙНАЯ СТРАНА".
+        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
         ctx.buy_ctx[uid] = {"country": None, "count": 1}
@@ -98,13 +121,16 @@ def register(ctx):
             kbd.buy_back(),
         )
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                     FSM: КОНКРЕТНАЯ СТРАНА                            #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.callback_query_handler(func=lambda c: c.data == "buy_single_country")
     @admin_required
     async def cb_buy_single_country(call: types.CallbackQuery):
+        """
+        Запускает покупку одного лота с конкретной страной.
+
+        Переводит пользователя в состояние buy_country.
+
+        :param call: callback_query от кнопки "🌍 КОНКРЕТНАЯ СТРАНА".
+        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
         ctx.buy_ctx[uid] = {"country": "", "count": 1}
@@ -120,13 +146,16 @@ def register(ctx):
             kbd.buy_back(),
         )
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                          FSM: ОПТОВАЯ                                 #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.callback_query_handler(func=lambda c: c.data == "buy_bulk")
     @admin_required
     async def cb_buy_bulk(call: types.CallbackQuery):
+        """
+        Запускает оптовую закупку.
+
+        Переводит пользователя в состояние buy_bulk_count.
+
+        :param call: callback_query от кнопки "📦 ОПТОВАЯ ЗАКУПКА".
+        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
         ctx.buy_ctx[uid] = {"country": None, "count": 0}
@@ -141,13 +170,17 @@ def register(ctx):
             kbd.buy_back(),
         )
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                          FSM: ИМПОРТ                                  #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.callback_query_handler(func=lambda c: c.data == "buy_import")
     @admin_required
     async def cb_buy_import(call: types.CallbackQuery):
+        """
+        Запускает импорт уже купленных лотов с LZT.
+
+        Проверяет готовность LZT и отсутствие активных задач,
+        затем создаёт фоновую задачу _import_purchases.
+
+        :param call: callback_query от кнопки "📥 ИМПОРТ ПОКУПОК LZT".
+        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
 
@@ -169,21 +202,29 @@ def register(ctx):
         )
         ctx.set_running_task(uid, task)
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                          СТОП                                         #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.callback_query_handler(func=lambda c: c.data == "buy_stop")
     @admin_required
     async def cb_buy_stop(call: types.CallbackQuery):
+        """
+        Останавливает текущую покупку.
+
+        Устанавливает флаг отмены в ctx.buy_cancel.
+
+        :param call: callback_query от кнопки "⛔ СТОП".
+        """
         await bot.answer_callback_query(call.id, "⏹ Останавливаю...")
         ctx.buy_cancel[call.from_user.id] = True
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       STATE HANDLERS (FSM)                            #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def state_buy_country(message, state):
+        """
+        FSM-обработчик ввода страны для покупки.
+
+        Валидирует длину названия, сохраняет в buy_ctx и переводит
+        в состояние buy_price.
+
+        :param message: объект Message с названием страны.
+        :param state: текущее FSM-состояние пользователя.
+        """
         uid = message.from_user.id
         country = (message.text or "").strip()
         if len(country) < 2:
@@ -201,6 +242,14 @@ def register(ctx):
         )
 
     async def state_buy_price(message, state):
+        """
+        FSM-обработчик ввода максимальной цены.
+
+        Парсит число, проверяет > 0, запускает одиночную покупку.
+
+        :param message: объект Message с ценой.
+        :param state: текущее FSM-состояние пользователя.
+        """
         uid = message.from_user.id
         try:
             max_price = float((message.text or "").strip().replace(",", "."))
@@ -215,6 +264,15 @@ def register(ctx):
         await _run_single_buy(message.chat.id, uid, max_price, country)
 
     async def state_buy_bulk_count(message, state):
+        """
+        FSM-обработчик ввода количества для опта.
+
+        Валидирует число 1–100, сохраняет в buy_ctx и переводит
+        в состояние buy_bulk_price.
+
+        :param message: объект Message с количеством.
+        :param state: текущее FSM-состояние пользователя.
+        """
         uid = message.from_user.id
         raw = (message.text or "").strip()
         if not raw.isdigit() or not (1 <= int(raw) <= 100):
@@ -232,6 +290,14 @@ def register(ctx):
         )
 
     async def state_buy_bulk_price(message, state):
+        """
+        FSM-обработчик ввода максимальной цены для опта.
+
+        Парсит число, проверяет > 0, запускает оптовую покупку.
+
+        :param message: объект Message с ценой.
+        :param state: текущее FSM-состояние пользователя.
+        """
         uid = message.from_user.id
         try:
             max_price = float((message.text or "").strip().replace(",", "."))
@@ -245,7 +311,6 @@ def register(ctx):
         ctx.user_state.pop(uid, None)
         await _run_bulk_buy(message.chat.id, uid, count, max_price)
 
-    # Регистрируем FSM в ctx (используется в add_account.py → text_router)
     if not hasattr(ctx, "_buy_state_handlers"):
         ctx._buy_state_handlers = {}
     ctx._buy_state_handlers.update({
@@ -255,16 +320,25 @@ def register(ctx):
         "buy_bulk_price": state_buy_bulk_price,
     })
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       СОХРАНЕНИЕ КУПЛЕННОГО                           #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def _save_bought(phone, session_str, two_fa, price,
                            item_country, item_id):
-        """Сохраняет купленный аккаунт в БД + записывает LZT-покупку."""
+        """
+        Сохраняет купленный аккаунт в БД и записывает LZT-покупку.
+
+        Сначала создаёт запись в lzt_purchases, потом в accounts.
+        Планирует автоочистку. Обновляет статус LZT-записи на
+        logged_in.
+
+        :param phone: номер телефона.
+        :param session_str: строка сессии.
+        :param two_fa: пароль 2FA (если есть).
+        :param price: цена в рублях.
+        :param item_country: страна лота.
+        :param item_id: ID лота LZT.
+        :return: объект Account при успехе, иначе None.
+        """
         phone = fmt_phone(phone)
 
-        # Запись в lzt_purchases
         try:
             db.add_lzt_purchase(
                 item_id=item_id, phone=phone, price=int(price or 0),
@@ -273,7 +347,6 @@ def register(ctx):
         except Exception as e:
             logger.warning(f"[buy.db] add_lzt_purchase: {e}")
 
-        # Запись в accounts
         try:
             db.add_account(
                 phone, session_str, two_fa or "",
@@ -300,14 +373,12 @@ def register(ctx):
                 pass
             return None
 
-        # Планируем автоочистку
         if ctx.schedule_auto_clean:
             try:
                 ctx.schedule_auto_clean(acc.id)
             except Exception as e:
                 logger.warning(f"[buy] schedule_auto_clean: {e}")
 
-        # Обновляем LZT-запись
         try:
             db.update_lzt_purchase(item_id, "logged_in", phone=phone)
         except Exception:
@@ -317,11 +388,19 @@ def register(ctx):
         db.stat_bought_lzt(1, spent_rub=int(price or 0))
         return acc
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       РАЗОВАЯ ПОКУПКА                                 #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def _run_single_buy(chat_id, uid, max_price, country):
+        """
+        Выполняет покупку одного лота.
+
+        Ищет самый дешёвый лот по фильтру (цена, страна), покупает,
+        логинится в аккаунт, сохраняет сессию. Показывает прогресс
+        в одном сообщении. Поддерживает отмену через ctx.buy_cancel.
+
+        :param chat_id: ID чата для отправки прогресса.
+        :param uid: Telegram ID админа.
+        :param max_price: максимальная цена в рублях.
+        :param country: страна (или None — любая).
+        """
         ctx.buy_cancel[uid] = False
         msg = await bot.send_message(
             chat_id,
@@ -373,7 +452,6 @@ def register(ctx):
                     await asyncio.sleep(lzt.BUY_DELAY)
                     continue
 
-                # Лот куплен → показываем
                 await safe_edit(
                     bot, chat_id, msg.message_id,
                     f"✅ Куплен лот {item_id} за {price} ₽\n"
@@ -381,7 +459,6 @@ def register(ctx):
                     kbd.buy_stop_kb(),
                 )
 
-                # Извлекаем 2FA-пароль
                 password = None
                 for key in ("telegram_password", "password", "twofa", "2fa",
                             "two_fa", "cloud_password"):
@@ -419,7 +496,6 @@ def register(ctx):
                     skip_ids.add(item_id)
                     continue
 
-                # Успех → сохраняем
                 acc = await _save_bought(phone, session_str, password,
                                          price, item_country, item_id)
 
@@ -455,11 +531,19 @@ def register(ctx):
         finally:
             ctx.buy_cancel.pop(uid, None)
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ОПТОВАЯ ПОКУПКА                                 #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def _run_bulk_buy(chat_id, uid, count, max_price):
+        """
+        Выполняет оптовую закупку нескольких лотов.
+
+        Покупает до count лотов по цене не выше max_price. Показывает
+        прогресс, поддерживает отмену. Собирает список успехов и
+        ошибок в отчёт.
+
+        :param chat_id: ID чата.
+        :param uid: Telegram ID админа.
+        :param count: сколько лотов купить.
+        :param max_price: максимальная цена за штуку.
+        """
         ctx.buy_cancel[uid] = False
         msg = await bot.send_message(
             chat_id,
@@ -515,7 +599,6 @@ def register(ctx):
                     await asyncio.sleep(lzt.BUY_DELAY)
                     continue
 
-                # Обновляем баланс
                 new_balance, _ = await lzt.get_balance(market)
                 if new_balance is not None:
                     balance = new_balance
@@ -589,11 +672,18 @@ def register(ctx):
         finally:
             ctx.buy_cancel.pop(uid, None)
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                          ИМПОРТ                                       #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def _import_purchases(chat_id, msg_id, uid):
+        """
+        Импортирует уже купленные лоты LZT в хранилище.
+
+        Получает список покупок, отфильтровывает неизвестные и
+        не-Telegram, для каждого пытается войти в аккаунт и сохранить
+        в БД. Показывает прогресс и поддерживает отмену.
+
+        :param chat_id: ID чата.
+        :param msg_id: ID сообщения для редактирования.
+        :param uid: Telegram ID админа.
+        """
         ctx.buy_cancel[uid] = False
 
         try:
@@ -645,7 +735,6 @@ def register(ctx):
                     kbd.buy_stop_kb(),
                 )
 
-                # Пробуем вытащить номер
                 login_data = await lzt.get_item_login_data(market, item_id)
                 phone = None
                 for key in ("phone", "phone_number", "number",

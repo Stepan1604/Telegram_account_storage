@@ -24,14 +24,28 @@ PAGE_SIZE = 5
 
 
 def register(ctx):
+    """
+    Регистрирует хендлеры очистки, проверки и автоочистки аккаунтов.
+
+    Включает: автоочистку через AUTO_CLEAN_DELAY после добавления,
+    прогрев сессий при старте бота, массовую и одиночную очистку
+    сессий и чатов, проверку живости аккаунтов и удаление мёртвых.
+
+    :param ctx: объект Context с общим состоянием.
+    """
     bot = ctx.bot
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       АВТООЧИСТКА (24ч + 10сек)                       #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def _auto_clean_after(account_id: int, delay: float):
-        """Через delay секунд делает ResetAuthorizations + чистку чатов."""
+        """
+        Автоочистка одного аккаунта через заданную задержку.
+
+        Спит delay секунд, затем делает ResetAuthorizations и чистит
+        диалоги. При успехе помечает аккаунт cleaned и уведомляет
+        админа. При ошибке FROZEN помечает dead.
+
+        :param account_id: ID аккаунта в БД.
+        :param delay: задержка в секундах.
+        """
         try:
             await asyncio.sleep(delay)
             acc = db.get_account(account_id)
@@ -82,16 +96,30 @@ def register(ctx):
             ctx.auto_clean_tasks.pop(account_id, None)
 
     def schedule_auto_clean(account_id: int, delay: float = AUTO_CLEAN_DELAY):
+        """
+        Планирует автоочистку аккаунта.
+
+        Создаёт asyncio-задачу и сохраняет её в ctx.auto_clean_tasks.
+        Если задача для этого аккаунта уже есть — ничего не делает.
+
+        :param account_id: ID аккаунта в БД.
+        :param delay: задержка в секундах перед очисткой.
+        """
         if account_id in ctx.auto_clean_tasks:
             return
         task = asyncio.create_task(_auto_clean_after(account_id, delay))
         ctx.auto_clean_tasks[account_id] = task
 
-    # Сохраняем в Context — нужно другим модулям
     ctx.schedule_auto_clean = schedule_auto_clean
 
-    # Восстанавливаем таймеры для уже добавленных аккаунтов при старте бота
     async def _restore_auto_clean():
+        """
+        Восстанавливает таймеры автоочистки при старте бота.
+
+        Проходит по всем uncleaned-аккаунтам и планирует автоочистку:
+        либо с задержкой 1 сек (если время уже прошло), либо с
+        оставшимся временем.
+        """
         try:
             now = datetime.now()
             for acc in db.get_accounts():
@@ -111,11 +139,14 @@ def register(ctx):
     except Exception as e:
         logger.warning(f"[clean] restore schedule: {e}")
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ПРОГРЕВ СЕССИЙ ПРИ СТАРТЕ                      #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def _warmup_sessions():
+        """
+        Прогревает все сессии аккаунтов при старте бота.
+
+        Подключается к каждому аккаунту, проверяет авторизацию и
+        обновляет last_checked_at. Показывает прогресс в одном
+        сообщении админу. Между аккаунтами пауза 3 секунды.
+        """
         await asyncio.sleep(5)
         accounts = db.get_accounts()
 
@@ -221,11 +252,19 @@ def register(ctx):
     except Exception as e:
         logger.warning(f"[clean] warmup schedule: {e}")
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                          ПРОВЕРКА ВСЕХ                                #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def _check_all(chat_id: int, msg_id: int, accounts, uid: int):
+        """
+        Проверяет живость всех аккаунтов.
+
+        Проходит по списку, вызывает is_alive для каждого, обновляет
+        last_checked_at и статус (если мёртв — dead). Показывает
+        прогресс в одном сообщении.
+
+        :param chat_id: ID чата для редактирования прогресса.
+        :param msg_id: ID сообщения для редактирования.
+        :param accounts: список аккаунтов для проверки.
+        :param uid: Telegram ID админа.
+        """
         total = len(accounts)
         ok = dead = 0
 
@@ -269,6 +308,15 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "check_accounts")
     @admin_required
     async def cb_check(call: types.CallbackQuery):
+        """
+        Запускает проверку всех аккаунтов.
+
+        Если хранилище пусто — сообщает. Если уже идёт другая задача
+        у этого пользователя — предупреждает. Иначе создаёт фоновую
+        задачу _check_all.
+
+        :param call: callback_query от кнопки "🔍 ПРОВЕРКА АККАУНТОВ".
+        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
         accounts = db.get_accounts()
@@ -287,11 +335,19 @@ def register(ctx):
         )
         ctx.set_running_task(uid, task)
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                     МАССОВАЯ ОЧИСТКА (Reset + чаты)                   #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def _clean_all(chat_id: int, msg_id: int, accounts, uid: int):
+        """
+        Массовая очистка uncleaned-аккаунтов.
+
+        Для каждого: отменяет автоочистку, вызывает reset_other_sessions,
+        помечает cleaned. Поддерживает отмену через ctx.cancel_flags.
+        Показывает прогресс и список ошибок.
+
+        :param chat_id: ID чата.
+        :param msg_id: ID сообщения для редактирования.
+        :param accounts: список аккаунтов для очистки.
+        :param uid: Telegram ID админа.
+        """
         ctx.cancel_flags[uid] = False
         total = len(accounts)
         ok = fail = 0
@@ -322,7 +378,6 @@ def register(ctx):
                 kbd.cleaning_progress(),
             )
 
-            # Отменяем автоочистку — сейчас делаем вручную
             task = ctx.pop_auto_clean_task(acc.id)
             if task and not task.done():
                 task.cancel()
@@ -370,6 +425,11 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "clean_sessions")
     @admin_required
     async def cb_clean(call: types.CallbackQuery):
+        """
+        Показывает подтверждение массовой очистки uncleaned-аккаунтов.
+
+        :param call: callback_query от кнопки "🧹 ОЧИСТИТЬ СЕССИИ".
+        """
         await bot.answer_callback_query(call.id)
         accounts = [a for a in db.get_accounts() if a.status == "uncleaned"]
 
@@ -400,6 +460,11 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "clean_confirm")
     @admin_required
     async def cb_clean_confirm(call: types.CallbackQuery):
+        """
+        Запускает массовую очистку после подтверждения.
+
+        :param call: callback_query от кнопки "✅ ДА, ОЧИСТИТЬ".
+        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
         accounts = [a for a in db.get_accounts() if a.status == "uncleaned"]
@@ -420,19 +485,28 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "clean_cancel")
     @admin_required
     async def cb_clean_cancel(call: types.CallbackQuery):
+        """
+        Отменяет текущую массовую очистку.
+
+        :param call: callback_query от кнопки "⏹ ОТМЕНИТЬ ОЧИСТКУ".
+        """
         ctx.cancel_flags[call.from_user.id] = True
         await bot.answer_callback_query(call.id, "⏹ Отмена...",
                                         show_alert=False)
-
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ОЧИСТКА ОДНОГО АККАУНТА                        #
-    # ═══════════════════════════════════════════════════════════════════ #
 
     @bot.callback_query_handler(
         func=lambda c: c.data.startswith("acc_clean_")
     )
     @admin_required
     async def cb_acc_clean(call: types.CallbackQuery):
+        """
+        Очищает один аккаунт: сессии + чаты.
+
+        Вызывает reset_other_sessions. При FROZEN помечает dead.
+        Отменяет автоочистку для этого аккаунта.
+
+        :param call: callback_query от кнопки "🧹 ОЧИСТИТЬ СЕССИИ".
+        """
         await bot.answer_callback_query(call.id, "⏳ Очищаю...")
         uid = call.from_user.id
         try:
@@ -457,7 +531,6 @@ def register(ctx):
             "⏳ Это может занять до минуты...",
         )
 
-        # Отменяем автоочистку
         task = ctx.pop_auto_clean_task(acc_id)
         if task and not task.done():
             task.cancel()
@@ -505,15 +578,16 @@ def register(ctx):
         ])
         await edit_or_send(bot, call, text, markup)
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ОЧИСТКА ТОЛЬКО ЧАТОВ                            #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.callback_query_handler(
         func=lambda c: c.data.startswith("acc_clear_chats_")
     )
     @admin_required
     async def cb_acc_clear_chats(call: types.CallbackQuery):
+        """
+        Очищает только чаты аккаунта (без сброса сессий).
+
+        :param call: callback_query от кнопки "🗑️ ОЧИСТИТЬ ЧАТЫ".
+        """
         await bot.answer_callback_query(call.id, "⏳ Чищу чаты...")
         uid = call.from_user.id
         try:
@@ -593,13 +667,14 @@ def register(ctx):
         ])
         await edit_or_send(bot, call, text, markup)
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                          УДАЛЕНИЕ МЁРТВЫХ                             #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.callback_query_handler(func=lambda c: c.data == "del_dead")
     @admin_required
     async def cb_del_dead(call: types.CallbackQuery):
+        """
+        Показывает подтверждение удаления мёртвых аккаунтов.
+
+        :param call: callback_query от кнопки "🗑️ УДАЛИТЬ МЁРТВЫЕ".
+        """
         await bot.answer_callback_query(call.id)
         dead_accs = [a for a in db.get_accounts() if a.status == "dead"]
 
@@ -631,6 +706,14 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "del_dead_confirm")
     @admin_required
     async def cb_del_dead_confirm(call: types.CallbackQuery):
+        """
+        Удаляет все dead-аккаунты из БД и бэкапа.
+
+        Для каждого отменяет автоочистку, закрывает клиент и удаляет
+        запись через db.delete_account (полное удаление).
+
+        :param call: callback_query от кнопки "✅ УДАЛИТЬ N АККАУНТОВ".
+        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
         cnt = 0

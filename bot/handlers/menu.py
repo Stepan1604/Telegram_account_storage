@@ -12,13 +12,28 @@ logger = logging.getLogger(__name__)
 
 
 def register(ctx):
+    """
+    Регистрирует хендлеры главного меню и команды /start.
+
+    Здесь же реализована очистка подвисших Telethon-клиентов, если
+    пользователь прервал флоу добавления аккаунта и вернулся в меню.
+
+    :param ctx: объект Context с общим состоянием.
+    """
     bot = ctx.bot
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                          ОТПРАВКА МЕНЮ                               #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def _send_main_menu(chat_id: int, edit_id: int = None) -> None:
+        """
+        Отправляет или редактирует главное меню с общей статистикой.
+
+        Показывает количество аккаунтов, очищенных, ожидающих очистки,
+        мёртвых, избранных и архивных. Внизу — список возможностей и
+        информация об автоочистке.
+
+        :param chat_id: ID чата.
+        :param edit_id: ID сообщения для редактирования. Если None —
+            отправит новое сообщение.
+        """
         s = db.get_accounts_stats()
 
         fav_line = (
@@ -63,8 +78,13 @@ def register(ctx):
 
     async def _cleanup_pending(uid: int) -> None:
         """
-        Закрывает подвисший TelegramClient, если пользователь
-        прервал флоу добавления аккаунта и вернулся в меню.
+        Закрывает подвисший TelegramClient из незавершённого флоу.
+
+        Если пользователь начал добавление аккаунта, но прервал его
+        и вернулся в меню, клиент остаётся в pending_signins и висит.
+        Эта функция закрывает его и удаляет запись.
+
+        :param uid: Telegram ID пользователя.
         """
         data = ctx.pending_signins.pop(uid, None)
         if not data:
@@ -77,38 +97,47 @@ def register(ctx):
             except Exception as e:
                 logger.warning(f"[cleanup_pending] uid={uid}: {e}")
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                          /start                                       #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.message_handler(commands=["start"])
     @admin_required
     async def cmd_start(message: types.Message):
+        """
+        Обрабатывает команду /start.
+
+        Закрывает подвисшие клиенты и показывает главное меню.
+
+        :param message: объект Message.
+        """
         await _cleanup_pending(message.from_user.id)
         await _send_main_menu(message.chat.id)
-
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ВОЗВРАТ В ГЛАВНОЕ МЕНЮ                          #
-    # ═══════════════════════════════════════════════════════════════════ #
 
     @bot.callback_query_handler(func=lambda c: c.data == "main_menu")
     @admin_required
     async def cb_main_menu(call: types.CallbackQuery):
+        """
+        Обрабатывает возврат в главное меню по кнопке.
+
+        Закрывает подвисшие клиенты, сбрасывает FSM-состояние
+        пользователя и редактирует сообщение на главное меню.
+
+        :param call: callback_query от кнопки "🏠 ГЛАВНОЕ МЕНЮ".
+        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
 
-        # Закрываем подвисший клиент, если пользователь прервал добавление
         await _cleanup_pending(uid)
 
-        # Сбрасываем всё, что могло остаться от незавершённых операций
         ctx.clear_user(uid)
         await _send_main_menu(call.message.chat.id, call.message.message_id)
-
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ПУСТОЙ ОТВЕТ (noop)                             #
-    # ═══════════════════════════════════════════════════════════════════ #
 
     @bot.callback_query_handler(func=lambda c: c.data == "noop")
     @admin_required
     async def cb_noop(call: types.CallbackQuery):
+        """
+        Обрабатывает нажатие на "пустые" кнопки (например, счётчик страниц).
+
+        Просто подтверждает callback, чтобы Telegram не показывал
+        бесконечную загрузку на кнопке.
+
+        :param call: callback_query с data="noop".
+        """
         await bot.answer_callback_query(call.id)

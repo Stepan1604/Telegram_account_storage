@@ -29,12 +29,16 @@ except ImportError:
 AVATAR_DIR = "avatars"
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                            ФОРМАТ НОМЕРА                                     #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def fmt_phone(phone: str) -> str:
-    """Единый формат номера: +XXXXXXXXXXX (только цифры, ведущий +)."""
+    """
+    Приводит номер телефона к формату +XXXXXXXXXXX.
+
+    Удаляет пробелы, скобки, дефисы, точки. Оставляет только цифры
+    и ведущий плюс.
+
+    :param phone: номер в любом формате.
+    :return: нормализованный номер или исходное значение, если пусто.
+    """
     if not phone:
         return phone
     s = str(phone).strip()
@@ -47,11 +51,16 @@ def fmt_phone(phone: str) -> str:
     return s
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                              LZT MARKET CLIENT                              #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def make_market():
+    """
+    Создаёт клиент LZT Market для запросов к API.
+
+    Проверяет наличие библиотеки LOLZTEAM и токена. Если задан
+    LZT_PROXY — устанавливает прокси в настройках.
+
+    :raises RuntimeError: если LOLZTEAM не установлен или токен пуст.
+    :return: экземпляр Market.
+    """
     if not LZT_AVAILABLE:
         raise RuntimeError("LOLZTEAM не установлен: pip install LOLZTEAM")
     if not LZT_API_TOKEN:
@@ -63,6 +72,15 @@ def make_market():
 
 
 async def get_balance(market) -> Tuple[Optional[float], Optional[int]]:
+    """
+    Получает баланс аккаунта LZT.
+
+    Суммирует все валютные балансы из ответа /balance/exchange.
+    Запоминает balance_id рублёвого счёта для последующих операций.
+
+    :param market: экземпляр Market.
+    :return: (сумма_баланса, balance_id) или (None, None) при ошибке.
+    """
     try:
         resp = await market.request("GET", "/balance/exchange")
         data = resp.json()
@@ -83,15 +101,28 @@ async def get_balance(market) -> Tuple[Optional[float], Optional[int]]:
 
 
 def get_country(item) -> str:
+    """
+    Извлекает страну из лота LZT.
+
+    :param item: словарь с данными лота.
+    :return: название страны или пустая строка.
+    """
     return str(item.get("telegram_country") or item.get("country") or "")
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                              FETCH CODE                                     #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 async def fetch_code(market, item_id: int, attempts: int = 1) -> Optional[str]:
-    """Опрашивает LZT Market на код подтверждения для лота."""
+    """
+    Опрашивает LZT Market на код подтверждения для лота.
+
+    Рекурсивно обходит JSON-ответ и ищет код по ключам code, email_code,
+    sms_code, otp, telegram_code, login_code. Если код в текстовых
+    полях — ищет 5-значное число.
+
+    :param market: экземпляр Market.
+    :param item_id: ID лота LZT.
+    :param attempts: сколько раз опросить.
+    :return: код в виде строки или None.
+    """
     code_keys = {"code", "email_code", "sms_code", "otp",
                  "telegram_code", "login_code"}
     text_keys = {"message", "text", "data", "msg"}
@@ -113,13 +144,11 @@ async def fetch_code(market, item_id: int, attempts: int = 1) -> Optional[str]:
             resp = await market.request("GET", f"/{item_id}/telegram-login-code")
             if resp.status_code == 200:
                 pairs = list(walk(resp.json()))
-                # 1) сначала ищем ключи с кодом
                 for k, v in pairs:
                     if isinstance(k, str) and k.lower() in code_keys and v is not None:
                         s = str(v).strip()
                         if s.isdigit() and 4 <= len(s) <= 8:
                             return s
-                # 2) fallback — 5-значное число в текстовых полях
                 for k, v in pairs:
                     if isinstance(k, str) and k.lower() in text_keys \
                             and isinstance(v, str):
@@ -137,12 +166,15 @@ async def fetch_code(market, item_id: int, attempts: int = 1) -> Optional[str]:
     return None
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                            PARSERS                                          #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def extract_phone(text: str) -> Optional[str]:
-    """Возвращает номер в формате +XXXXXXXXXXX или None."""
+    """
+    Извлекает номер телефона из произвольного текста.
+
+    Ищет сначала последовательность с плюсом, потом 10–15 цифр.
+
+    :param text: текст для поиска.
+    :return: номер в формате +XXXXXXXXXXX или None.
+    """
     if not text:
         return None
     m = re.search(r"(\+\d[\d\s\-\(\)\.]{7,20})", text)
@@ -157,6 +189,16 @@ def extract_phone(text: str) -> Optional[str]:
 
 
 def extract_login_data(data) -> dict:
+    """
+    Рекурсивно извлекает login-данные из ответа LZT.
+
+    Обходит вложенные словари и списки, собирает все пары ключ-значение
+    в плоский словарь. Если попадается JSON-строка (loginData, json,
+    data) — распарсивает её и тоже добавляет.
+
+    :param data: JSON-ответ от LZT.
+    :return: плоский словарь со всеми полями.
+    """
     result = {}
     root = data
     for wrapper in ("data", "item", "account", "response"):
@@ -188,15 +230,22 @@ def extract_login_data(data) -> dict:
     return result
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                              BUY ONE                                        #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 async def buy_one(market, max_price: float, balance_id=None, balance=None,
                   skip_ids: set = None, country: str = None):
     """
-    Ищет и покупает ОДИН самый дешёвый лот.
-    Возвращает (ok, item_id, phone, price, country, login_data, err).
+    Ищет и покупает один самый дешёвый лот.
+
+    Перебирает страницы выдачи /telegram (до 10), фильтрует по цене
+    и стране, покупает через fast-buy. Если баланс меньше цены —
+    возвращает no_money. Если лоты закончились — no_lots.
+
+    :param market: экземпляр Market.
+    :param max_price: максимальная цена в рублях.
+    :param balance_id: ID рублёвого баланса.
+    :param balance: текущий баланс.
+    :param skip_ids: ID лотов, которые нужно пропустить.
+    :param country: фильтр по стране (или None).
+    :return: (ok, item_id, phone, price, country, login_data, err).
     """
     if skip_ids is None:
         skip_ids = set()
@@ -290,12 +339,14 @@ async def buy_one(market, max_price: float, balance_id=None, balance=None,
     return False, None, None, None, None, {}, "no_lots"
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                       LZT ITEM / PURCHASE HELPERS                           #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 async def get_item_login_data(market, item_id: int) -> dict:
-    """Свежие данные лота (phone, 2FA-пароль) — для повторного входа."""
+    """
+    Получает свежие данные лота (номер, 2FA-пароль).
+
+    :param market: экземпляр Market.
+    :param item_id: ID лота.
+    :return: плоский словарь с данными или пустой словарь.
+    """
     try:
         resp = await market.request("GET", f"/{item_id}")
         return extract_login_data(resp.json())
@@ -305,7 +356,15 @@ async def get_item_login_data(market, item_id: int) -> dict:
 
 
 async def list_purchases(market) -> list:
-    """Возвращает список всех купленных лотов (все страницы)."""
+    """
+    Возвращает список всех купленных лотов (все страницы).
+
+    Проходит страницы /user/items до 20-й, собирает все items в
+    один список.
+
+    :param market: экземпляр Market.
+    :return: список словарей-лотов.
+    """
     result = []
     for page in range(1, 21):
         try:
@@ -330,6 +389,12 @@ async def list_purchases(market) -> list:
 
 
 def is_telegram_item(item: dict) -> bool:
+    """
+    Проверяет, относится ли лот к категории Telegram.
+
+    :param item: словарь-лот.
+    :return: True, если это Telegram-лот.
+    """
     for key in ("category", "category_id", "item_origin", "title", "item_type"):
         v = item.get(key)
         if v is not None and "telegram" in str(v).lower():
@@ -337,11 +402,16 @@ def is_telegram_item(item: dict) -> bool:
     return bool(item.get("telegram_id") or item.get("telegram_country"))
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                              AVATAR                                         #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 async def set_random_avatar(client) -> Tuple[bool, str]:
+    """
+    Устанавливает случайную аватарку из папки avatars/.
+
+    Берёт случайный .jpg/.jpeg/.png из AVATAR_DIR и загружает его
+    в профиль через UploadProfilePhotoRequest.
+
+    :param client: активный TelegramClient.
+    :return: (успех, информация) — (True, путь) или (False, причина).
+    """
     if not os.path.isdir(AVATAR_DIR):
         return False, "no_dir"
     files = [f for f in os.listdir(AVATAR_DIR)
@@ -360,26 +430,34 @@ async def set_random_avatar(client) -> Tuple[bool, str]:
         return False, f"error:{str(e)[:80]}"
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                              LOGIN TO ACCOUNT                               #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 async def login_to_account(phone: str, item_id: int, market,
                            password: Optional[str] = None):
     """
-    Заходит на купленный аккаунт.
-    Возвращает (session_str, status):
-      - ("1BVts...", "ok")
-      - (None, "needs_2fa")
-      - (None, "no_code_from_market")
-      - (None, "invalid_code")
-      - (None, "send_unavailable")
-      - (None, "phone_banned")
-      - (None, "phone_invalid")
-      - (None, "phone_flood")
-      - (None, "flood_N")
-      - (None, "timeout")
-      - (None, "error:...")
+    Заходит на купленный аккаунт по номеру телефона.
+
+    Отправляет код, ждёт появления кода на LZT (fetch_code), вводит
+    его в Telegram. Если нужен 2FA — использует password, либо
+    повторно берёт свежий из лота. После входа устанавливает
+    случайную аватарку.
+
+    Возможные статусы:
+      - ("1BVts...", "ok") — успех
+      - (None, "needs_2fa") — нужен 2FA-пароль
+      - (None, "no_code_from_market") — LZT не отдал код
+      - (None, "invalid_code") — код не подошёл
+      - (None, "send_unavailable") — Telegram не даёт запросить код
+      - (None, "phone_banned") — номер забанен
+      - (None, "phone_invalid") — неверный номер
+      - (None, "phone_flood") — флуд на номер
+      - (None, "flood_N") — FloodWait на N секунд
+      - (None, "timeout") — таймаут
+      - (None, "error:...") — прочие ошибки
+
+    :param phone: номер телефона.
+    :param item_id: ID лота LZT.
+    :param market: экземпляр Market.
+    :param password: пароль 2FA (если известен).
+    :return: (session_string, status).
     """
     phone = fmt_phone(phone)
     client = make_client()
@@ -395,7 +473,6 @@ async def login_to_account(phone: str, item_id: int, market,
     signed = False
 
     try:
-        # --- 1) ПЕРВЫЙ ЗАПРОС КОДА --- #
         try:
             sent = await asyncio.wait_for(
                 client.send_code_request(phone), timeout=15)
@@ -420,7 +497,6 @@ async def login_to_account(phone: str, item_id: int, market,
             logger.warning(f"[lzt.login] {phone}: timeout на send_code")
             return None, "timeout"
 
-        # --- 2) ЦИКЛ ОЖИДАНИЯ КОДА --- #
         for round_no in range(CODE_ROUNDS):
             if round_no > 0:
                 logger.info(f"[lzt.login] {phone}: повторный запрос кода "
@@ -447,7 +523,6 @@ async def login_to_account(phone: str, item_id: int, market,
                         f"[lzt.login] {phone}: повторный запрос не удался "
                         f"({type(e).__name__}), использую прежний hash")
 
-            # Опрос LZT на код
             for attempt in range(CODE_ATTEMPTS):
                 await asyncio.sleep(CODE_DELAY)
                 code = await fetch_code(market, item_id)
@@ -526,7 +601,6 @@ async def login_to_account(phone: str, item_id: int, market,
             logger.warning(f"[lzt.login] {phone}: не удалось войти — {status}")
             return None, status
 
-        # --- 3) СОХРАНЕНИЕ СЕССИИ --- #
         try:
             session_str = client.session.save()
         except Exception as e:
@@ -537,7 +611,6 @@ async def login_to_account(phone: str, item_id: int, market,
         if not session_str:
             return None, "error:empty_session"
 
-        # --- 4) АВАТАРКА (не критично) --- #
         try:
             ok_ava, ava_info = await set_random_avatar(client)
             if ok_ava:

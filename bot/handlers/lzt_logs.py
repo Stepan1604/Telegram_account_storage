@@ -24,13 +24,26 @@ logger = logging.getLogger(__name__)
 
 
 def register(ctx):
+    """
+    Регистрирует хендлеры LZT-логов.
+
+    Включает: меню LZT-логов со статистикой, список покупок с
+    фильтрами (все / вошёл / не удалось), детали одной записи,
+    повторный вход в аккаунт по неудавшейся покупке, экспорт
+    LZT-логов в CSV.
+
+    :param ctx: объект Context с общим состоянием.
+    """
     bot = ctx.bot
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                          МЕНЮ LZT-ЛОГОВ                              #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def _render_lzt_logs_menu(chat_id, edit_id=None, call=None):
+        """
+        Рисует меню LZT-логов со статистикой покупок.
+
+        :param chat_id: ID чата.
+        :param edit_id: ID сообщения для редактирования.
+        :param call: callback_query (если вызвано из кнопки).
+        """
         s = db.get_lzt_stats()
         text = (
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -53,15 +66,25 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "lzt_logs")
     @admin_required
     async def cb_lzt_logs(call: types.CallbackQuery):
+        """
+        Открывает меню LZT-логов.
+
+        :param call: callback_query от кнопки "📥 LZT-ЛОГИ".
+        """
         await bot.answer_callback_query(call.id)
         await _render_lzt_logs_menu(call.message.chat.id, call=call)
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                          СПИСОК ПО ФИЛЬТРУ                            #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def _render_lzt_list(chat_id, filter_type, page,
                                edit_id=None, call=None):
+        """
+        Рисует страницу списка LZT-покупок по фильтру.
+
+        :param chat_id: ID чата.
+        :param filter_type: фильтр ("all", "logged", "failed", "bought").
+        :param page: номер страницы (0-индексация).
+        :param edit_id: ID сообщения для редактирования.
+        :param call: callback_query (если вызвано из кнопки).
+        """
         status_map = {
             "all": None,
             "logged": "logged_in",
@@ -116,18 +139,33 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "lzt_logs_all")
     @admin_required
     async def cb_lzt_all(call: types.CallbackQuery):
+        """
+        Открывает список всех LZT-покупок.
+
+        :param call: callback_query от кнопки "📥 ВСЕ ПОКУПКИ".
+        """
         await bot.answer_callback_query(call.id)
         await _render_lzt_list(call.message.chat.id, "all", 0, call=call)
 
     @bot.callback_query_handler(func=lambda c: c.data == "lzt_logs_logged")
     @admin_required
     async def cb_lzt_logged(call: types.CallbackQuery):
+        """
+        Открывает список успешно залогиненных LZT-покупок.
+
+        :param call: callback_query от кнопки "🟢 ВОШЁЛ В АККАУНТ".
+        """
         await bot.answer_callback_query(call.id)
         await _render_lzt_list(call.message.chat.id, "logged", 0, call=call)
 
     @bot.callback_query_handler(func=lambda c: c.data == "lzt_logs_failed")
     @admin_required
     async def cb_lzt_failed(call: types.CallbackQuery):
+        """
+        Открывает список неудавшихся LZT-покупок.
+
+        :param call: callback_query от кнопки "🔴 НЕ УДАЛОСЬ ВОЙТИ".
+        """
         await bot.answer_callback_query(call.id)
         await _render_lzt_list(call.message.chat.id, "failed", 0, call=call)
 
@@ -139,7 +177,11 @@ def register(ctx):
     )
     @admin_required
     async def cb_lzt_page(call: types.CallbackQuery):
-        # Формат: lzt_logs_{filter}_{page}
+        """
+        Переключает страницу LZT-логов.
+
+        :param call: callback_query с data="lzt_logs_{filter}_{page}".
+        """
         try:
             parts = call.data.split("_")
             if len(parts) != 4:
@@ -154,18 +196,23 @@ def register(ctx):
         await _render_lzt_list(call.message.chat.id, filter_type, page,
                                call=call)
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ДЕТАЛИ ОДНОЙ ЗАПИСИ                             #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.callback_query_handler(
         func=lambda c: c.data.startswith("lzt_log_view_")
     )
     @admin_required
     async def cb_lzt_view(call: types.CallbackQuery):
+        """
+        Открывает детали одной LZT-записи.
+
+        Показывает: ID лота, номер, страну, цену, дату, статус,
+        наличие в хранилище, ошибку (если была). Кнопка "Повторить
+        вход" появляется, если запись провалилась, но номер известен
+        и аккаунта в хранилище ещё нет.
+
+        :param call: callback_query с data="lzt_log_view_{id}_{filter}_{page}".
+        """
         await bot.answer_callback_query(call.id)
         try:
-            # lzt_log_view_{item_id}_{filter}_{page}
             parts = call.data.split("_")
             item_id = int(parts[3])
             filter_type = parts[4]
@@ -213,11 +260,12 @@ def register(ctx):
             kbd.lzt_log_detail_kb(item_id, filter_type, page, can_retry),
         )
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ПОВТОРНЫЙ ВХОД                                  #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     def _lzt_err() -> str:
+        """
+        Проверяет готовность LZT к работе.
+
+        :return: пустая строка если всё ок, иначе текст ошибки.
+        """
         if not lzt.LZT_AVAILABLE:
             return "LOLZTEAM не установлен: pip install LOLZTEAM"
         if not lzt.LZT_API_TOKEN:
@@ -227,9 +275,13 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data.startswith("lzt_retry_"))
     @admin_required
     async def cb_lzt_retry(call: types.CallbackQuery):
+        """
+        Запускает повторный вход в аккаунт по LZT-записи.
+
+        :param call: callback_query с data="lzt_retry_{item_id}_...".
+        """
         await bot.answer_callback_query(call.id, "🔁 Пробую войти...")
         try:
-            # lzt_retry_{item_id}_{filter}_{page}
             parts = call.data.split("_")
             item_id = int(parts[2])
         except (ValueError, IndexError):
@@ -238,6 +290,17 @@ def register(ctx):
 
     async def _retry_login_for_purchase(call: types.CallbackQuery,
                                         item_id: int):
+        """
+        Пытается повторно войти в аккаунт по LZT-записи.
+
+        Проверяет, что запись есть, номер известен, аккаунта ещё нет
+        в хранилище. Получает свежие данные лота (для 2FA), вызывает
+        lzt.login_to_account. При успехе сохраняет аккаунт в БД,
+        планирует автоочистку, обновляет статус LZT-записи на logged_in.
+
+        :param call: callback_query.
+        :param item_id: ID лота LZT.
+        """
         it = db.get_lzt_purchase(item_id)
         if not it:
             await edit_or_send(bot, call, "❌ Запись не найдена",
@@ -270,7 +333,6 @@ def register(ctx):
             )
             return
 
-        # Уже добавлен в хранилище?
         existing = db.get_account_by_phone(phone)
         if existing:
             db.update_lzt_purchase(item_id, "logged_in", phone=phone)
@@ -285,7 +347,6 @@ def register(ctx):
             )
             return
 
-        # Создаём market
         try:
             market = lzt.make_market()
         except Exception as e:
@@ -293,7 +354,6 @@ def register(ctx):
                                kbd.back_main())
             return
 
-        # Свежие данные лота (для 2FA)
         login_data = await lzt.get_item_login_data(market, item_id)
         password = None
         for key in ("telegram_password", "password", "twofa", "2fa",
@@ -302,7 +362,6 @@ def register(ctx):
                 password = str(login_data[key])
                 break
 
-        # Вход
         session_str, status = await lzt.login_to_account(
             phone, item_id, market, password=password
         )
@@ -327,7 +386,6 @@ def register(ctx):
             )
             return
 
-        # Сохраняем аккаунт
         try:
             db.add_account(
                 phone, session_str, password or "",
@@ -378,8 +436,13 @@ def register(ctx):
         ])
         await edit_or_send(bot, call, text, markup)
 
-    # Хелпер — код страны без импорта helpers.get_country_code
     def _get_country_code(phone: str) -> str:
+        """
+        Определяет код страны по номеру телефона через config.COUNTRIES.
+
+        :param phone: номер телефона.
+        :return: код страны (например, "US") или пустая строка.
+        """
         from config import COUNTRIES
         p = fmt_phone(phone)
         for c in sorted(COUNTRIES,
@@ -389,13 +452,16 @@ def register(ctx):
                 return c.get("code", "")
         return ""
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ЭКСПОРТ LZT-ЛОГОВ В CSV                         #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.callback_query_handler(func=lambda c: c.data == "lzt_logs_export")
     @admin_required
     async def cb_lzt_logs_export(call: types.CallbackQuery):
+        """
+        Экспортирует все LZT-покупки в CSV.
+
+        Собирает до 5000 записей и отправляет файлом в чат.
+
+        :param call: callback_query от кнопки "📤 ЭКСПОРТ LZT-ЛОГОВ (CSV)".
+        """
         await bot.answer_callback_query(call.id, "📤 Готовлю файл...")
 
         items = db.get_lzt_purchases(limit=5000)

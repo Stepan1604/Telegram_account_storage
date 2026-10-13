@@ -1,4 +1,3 @@
-import asyncio
 import io
 import logging
 from datetime import datetime
@@ -30,17 +29,34 @@ PAGE_SIZE = 5
 
 
 def register(ctx):
-    bot = ctx.bot
+    """
+    Регистрирует хендлеры хранилища аккаунтов.
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                          СПИСОК ХРАНИЛИЩА                            #
-    # ═══════════════════════════════════════════════════════════════════ #
+    Включает: список хранилища с пагинацией, избранное, карточку
+    аккаунта с профилем из Telegram, получение кода входа,
+    переименование, смену статуса, удаление и экспорт CSV.
+
+    :param ctx: объект Context с общим состоянием.
+    """
+    bot = ctx.bot
 
     async def _render_storage(chat_id, page, edit_id=None, call=None,
                               favorites_only=False):
+        """
+        Рисует страницу хранилища или избранного.
+
+        Показывает список аккаунтов для текущей страницы с эмодзи
+        статуса и звёздочкой избранного, статистику сверху и
+        навигацию внизу.
+
+        :param chat_id: ID чата.
+        :param page: номер страницы (0-индексация).
+        :param edit_id: ID сообщения для редактирования.
+        :param call: callback_query (если вызвано из кнопки).
+        :param favorites_only: если True — показывать только избранные.
+        """
         accounts = db.get_favorites() if favorites_only else db.get_accounts()
 
-        # ── Пустое хранилище ──
         if not accounts:
             if favorites_only:
                 text = (
@@ -105,6 +121,11 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "storage")
     @admin_required
     async def cb_storage(call: types.CallbackQuery):
+        """
+        Открывает хранилище с первой страницы.
+
+        :param call: callback_query от кнопки "📦 ХРАНИЛИЩЕ".
+        """
         await bot.answer_callback_query(call.id)
         await _render_storage(call.message.chat.id, 0, call=call)
 
@@ -113,6 +134,11 @@ def register(ctx):
     )
     @admin_required
     async def cb_storage_page(call: types.CallbackQuery):
+        """
+        Переключает страницу хранилища.
+
+        :param call: callback_query с data="storage_page_N".
+        """
         await bot.answer_callback_query(call.id)
         try:
             page = int(call.data.replace("storage_page_", ""))
@@ -123,6 +149,11 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "favorites")
     @admin_required
     async def cb_favorites(call: types.CallbackQuery):
+        """
+        Открывает список избранных с первой страницы.
+
+        :param call: callback_query от кнопки "⭐ ИЗБРАННОЕ".
+        """
         await bot.answer_callback_query(call.id)
         await _render_storage(call.message.chat.id, 0, call=call,
                               favorites_only=True)
@@ -132,6 +163,11 @@ def register(ctx):
     )
     @admin_required
     async def cb_favorites_page(call: types.CallbackQuery):
+        """
+        Переключает страницу избранного.
+
+        :param call: callback_query с data="favorites_page_N".
+        """
         await bot.answer_callback_query(call.id)
         try:
             page = int(call.data.replace("favorites_page_", ""))
@@ -140,12 +176,19 @@ def register(ctx):
         await _render_storage(call.message.chat.id, page, call=call,
                               favorites_only=True)
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                          КАРТОЧКА АККАУНТА                            #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def _render_account(call: types.CallbackQuery, acc_id: int,
                               page: int):
+        """
+        Показывает карточку аккаунта с профилем из Telegram.
+
+        Сначала выводит базовую карточку с заглушкой "Загружаю профиль",
+        потом подтягивает данные из Telegram (имя, юзернейм, ID, сессии,
+        чаты) и редактирует сообщение с финальным текстом.
+
+        :param call: callback_query.
+        :param acc_id: ID аккаунта в БД.
+        :param page: номер страницы хранилища для возврата.
+        """
         acc = db.get_account(acc_id)
         if not acc:
             await edit_or_send(bot, call, "❌ Аккаунт не найден",
@@ -194,27 +237,6 @@ def register(ctx):
         name_display = acc.name or acc.phone
         star_mark = " ⭐" if (acc.favorite or 0) == 1 else ""
 
-        # ── Функция-сборщик текста ──
-        def _build_text(profile_block: str = "") -> str:
-            return (
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "📱 ИНФОРМАЦИЯ ОБ АККАУНТЕ\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"🏷 Название: {name_display}{star_mark}\n"
-                    f"📞 Номер:    {acc.phone}\n"
-                    f"🌍 Страна:   {country_label(acc.phone)}\n"
-                    f"📆 Добавлен: {date_str}\n"
-                    f"🔐 2FA:      {two_fa}\n"
-                    f"📌 Статус:   {status_label(acc.status)}"
-                    f"{source_line}\n\n"
-                    f"👤 ПРОФИЛЬ TELEGRAM\n"
-                    + profile_block
-                    + f"{checked_line}"
-                      f"{cleaned_line}"
-                      f"{auto_line}"
-            )
-
-        # ── 1. Показываем заглушку ──
         placeholder = (
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "📱 ИНФОРМАЦИЯ ОБ АККАУНТЕ\n"
@@ -230,7 +252,6 @@ def register(ctx):
         )
         await edit_or_send(bot, call, placeholder, kbd.account_card(acc, page))
 
-        # ── 2. Подгружаем инфо ──
         info = await get_account_info(acc.session, acc.phone)
 
         if not info["ok"]:
@@ -252,13 +273,33 @@ def register(ctx):
                 f"  📦 Всего:     {info['total_dialogs']}\n"
             )
 
-        # ── 3. Финальный текст ──
-        final_text = _build_text(profile_block)
+        final_text = (
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📱 ИНФОРМАЦИЯ ОБ АККАУНТЕ\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🏷 Название: {name_display}{star_mark}\n"
+            f"📞 Номер:    {acc.phone}\n"
+            f"🌍 Страна:   {country_label(acc.phone)}\n"
+            f"📆 Добавлен: {date_str}\n"
+            f"🔐 2FA:      {two_fa}\n"
+            f"📌 Статус:   {status_label(acc.status)}"
+            f"{source_line}\n\n"
+            "👤 ПРОФИЛЬ TELEGRAM\n"
+            f"{profile_block}"
+            f"{checked_line}"
+            f"{cleaned_line}"
+            f"{auto_line}"
+        )
         await edit_or_send(bot, call, final_text, kbd.account_card(acc, page))
 
     @bot.callback_query_handler(func=lambda c: c.data.startswith("acc_view_"))
     @admin_required
     async def cb_acc_view(call: types.CallbackQuery):
+        """
+        Открывает карточку аккаунта по кнопке.
+
+        :param call: callback_query с data="acc_view_{id}_{page}".
+        """
         await bot.answer_callback_query(call.id)
         try:
             _, _, acc_id, page = call.data.split("_")
@@ -268,13 +309,17 @@ def register(ctx):
             return
         await _render_account(call, acc_id, page)
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ПОЛУЧИТЬ КОД ВХОДА                             #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.callback_query_handler(func=lambda c: c.data.startswith("acc_code_"))
     @admin_required
     async def cb_acc_code(call: types.CallbackQuery):
+        """
+        Читает код входа из переписки аккаунта с Telegram (777000).
+
+        Использует read_login_code. Показывает код и 2FA в
+        моноширинном формате, чтобы их можно было скопировать тапом.
+
+        :param call: callback_query от кнопки "🔑 ПОЛУЧИТЬ КОД".
+        """
         await bot.answer_callback_query(call.id, "⏳ Читаю...")
         try:
             _, _, acc_id, page = call.data.split("_")
@@ -302,12 +347,12 @@ def register(ctx):
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 "🔑 КОД ВХОДА ПОЛУЧЕН\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📞 Номер: {acc.phone}\n"
+                f"📞 Номер: `{acc.phone}`\n"
                 f"🔑 Код:   `{code}`\n"
             )
             if acc.two_fa:
                 text += f"🔐 2FA:   `{acc.two_fa}`\n"
-            text += "\n💡 Введите код в Telegram."
+            text += "\n💡 Нажмите на код или 2FA, чтобы скопировать."
         else:
             text = (
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -323,13 +368,14 @@ def register(ctx):
         ])
         await edit_or_send(bot, call, text, markup, parse_mode="Markdown")
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                          ИЗБРАННОЕ                                    #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.callback_query_handler(func=lambda c: c.data.startswith("acc_fav_"))
     @admin_required
     async def cb_acc_fav(call: types.CallbackQuery):
+        """
+        Переключает флаг избранного у аккаунта.
+
+        :param call: callback_query от кнопки "☆ В ИЗБРАННОЕ" / "★ УБРАТЬ".
+        """
         try:
             _, _, acc_id, page = call.data.split("_")
             acc_id, page = int(acc_id), int(page)
@@ -354,13 +400,17 @@ def register(ctx):
         )
         await _render_account(call, acc_id, page)
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                        ДАТЬ НАЗВАНИЕ                                  #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.callback_query_handler(func=lambda c: c.data.startswith("acc_rename_"))
     @admin_required
     async def cb_acc_rename(call: types.CallbackQuery):
+        """
+        Запускает FSM переименования аккаунта.
+
+        Переводит пользователя в состояние rename_account и просит
+        отправить новое название.
+
+        :param call: callback_query от кнопки "🏷 ДАТЬ НАЗВАНИЕ".
+        """
         await bot.answer_callback_query(call.id)
         try:
             _, _, acc_id, page = call.data.split("_")
@@ -392,15 +442,19 @@ def register(ctx):
         )
         await edit_or_send(bot, call, text, kbd.cancel())
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                        СМЕНА СТАТУСА                                  #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.callback_query_handler(
         func=lambda c: c.data.startswith("acc_status_set_")
     )
     @admin_required
     async def cb_acc_status_set(call: types.CallbackQuery):
+        """
+        Устанавливает новый статус аккаунта.
+
+        Если новый статус "cleaned" — отменяет запланированную
+        автоочистку для этого аккаунта.
+
+        :param call: callback_query с data="acc_status_set_{id}_{status}_{page}".
+        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
         try:
@@ -417,7 +471,6 @@ def register(ctx):
         db.update_account_status(acc_id, new_status)
         db.log_action(uid, "status", details=new_status, account_id=acc_id)
 
-        # Смена на "cleaned" — отменяем автоочистку
         if new_status == "cleaned":
             task = ctx.pop_auto_clean_task(acc_id)
             if task and not task.done():
@@ -434,6 +487,11 @@ def register(ctx):
     )
     @admin_required
     async def cb_acc_status(call: types.CallbackQuery):
+        """
+        Открывает меню выбора нового статуса аккаунта.
+
+        :param call: callback_query от кнопки "✏️ ИЗМЕНИТЬ СТАТУС".
+        """
         await bot.answer_callback_query(call.id)
         try:
             _, _, acc_id, page = call.data.split("_")
@@ -457,15 +515,20 @@ def register(ctx):
         )
         await edit_or_send(bot, call, text, kbd.status_menu(acc_id, page))
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                        УДАЛЕНИЕ АККАУНТА                              #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.callback_query_handler(
         func=lambda c: c.data.startswith("acc_del_yes_")
     )
     @admin_required
     async def cb_acc_del_yes(call: types.CallbackQuery):
+        """
+        Удаляет аккаунт из БД и из бэкапа.
+
+        Отменяет автоочистку, закрывает Telethon-клиент, удаляет
+        запись через db.delete_account (полное удаление — из БД и
+        из accounts_backup.json).
+
+        :param call: callback_query от кнопки "✅ ДА, УДАЛИТЬ".
+        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
         try:
@@ -496,6 +559,11 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data.startswith("acc_del_"))
     @admin_required
     async def cb_acc_del(call: types.CallbackQuery):
+        """
+        Показывает подтверждение удаления аккаунта.
+
+        :param call: callback_query от кнопки "🗑️ УДАЛИТЬ".
+        """
         await bot.answer_callback_query(call.id)
         try:
             _, _, acc_id, page = call.data.split("_")
@@ -519,15 +587,19 @@ def register(ctx):
         )
         await edit_or_send(bot, call, text, kbd.confirm_delete(acc_id, page))
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                    ЭКСПОРТ ОДНОГО АККАУНТА                            #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     @bot.callback_query_handler(
         func=lambda c: c.data.startswith("acc_export_")
     )
     @admin_required
     async def cb_acc_export(call: types.CallbackQuery):
+        """
+        Экспортирует аккаунт в CSV.
+
+        Собирает все поля аккаунта (включая session_string) в файл
+        и отправляет документом в чат.
+
+        :param call: callback_query от кнопки "📤 ЭКСПОРТ ЭТОГО АККАУНТА".
+        """
         await bot.answer_callback_query(call.id, "📤 Готовлю файл...")
         try:
             _, _, acc_id, page = call.data.split("_")

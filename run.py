@@ -12,11 +12,14 @@ from config import BOT_TOKEN, ADMIN_ID, ADMINS
 logger = logging.getLogger("runner")
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                                ЛОГИРОВАНИЕ                                  #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def setup_logging():
+    """
+    Настраивает корневой логгер и приглушает шумные библиотеки.
+
+    Формат: "дата - имя - уровень - сообщение". Устанавливает уровень
+    INFO для корневого логгера и WARNING/CRITICAL для telethon,
+    TeleBot, httpx, httpcore, asyncio.
+    """
     fmt = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
@@ -40,25 +43,23 @@ def setup_logging():
 setup_logging()
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                              БОТ                                            #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 if ADMIN_ID not in ADMINS:
     ADMINS.append(ADMIN_ID)
 
 bot = AsyncTeleBot(BOT_TOKEN)
 
-from bot.handlers import register_handlers            # noqa: E402
-from bot.middlewares import AdminMiddleware           # noqa: E402
+from bot.handlers import register_handlers
+from bot.middlewares import AdminMiddleware
 
-
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                              УТИЛИТЫ                                         #
-# ═══════════════════════════════════════════════════════════════════════════ #
 
 def check_encryption_key():
-    """Проверяет наличие файла ключа шифрования."""
+    """
+    Проверяет наличие файла ключа шифрования.
+
+    Ищет сначала data/secret.key, потом secret.key в корне. Если
+    файла нет — предупреждает, что ключ будет сгенерирован при
+    первом обращении к БД. Без ключа session не расшифруются.
+    """
     try:
         if os.path.exists("data/secret.key"):
             size = os.path.getsize("data/secret.key")
@@ -77,6 +78,12 @@ def check_encryption_key():
 
 
 async def notify_startup():
+    """
+    Отправляет всем админам уведомление о запуске бота.
+
+    В сообщении — текущее время и статистика хранилища (всего,
+    очищено, не очищено, мёртвых).
+    """
     import database as db
 
     s = db.get_accounts_stats()
@@ -98,24 +105,24 @@ async def notify_startup():
 
 async def shutdown_all() -> None:
     """
-    Корректное завершение: закрываем все Telethon-клиенты,
-    даём event loop'у досчитать оставшиеся задачи, закрываем БД.
+    Корректно завершает работу бота.
+
+    Закрывает все Telethon-клиенты через shutdown_all_clients,
+    даёт event loop'у досчитать оставшиеся фоновые задачи (send/recv
+    циклы Telethon), отменяет зависшие, закрывает сессию SQLAlchemy
+    и engine.
     """
-    # 1) Закрываем ВСЕ Telethon-клиенты
     try:
         from bot.telethon_ops import shutdown_all_clients
         await asyncio.shield(shutdown_all_clients())
     except Exception as e:
         logger.warning(f"⚠️ shutdown_all_clients: {e}")
 
-    # 2) Даём loop'у цикл, чтобы внутренние Task'и Telethon
-    #    (_send_loop, _recv_loop) успели завершиться
     try:
         await asyncio.sleep(0.5)
     except Exception:
         pass
 
-    # 3) Прибиваем оставшиеся задачи (если есть)
     try:
         current = asyncio.current_task()
         pending = [t for t in asyncio.all_tasks()
@@ -129,7 +136,6 @@ async def shutdown_all() -> None:
     except Exception as e:
         logger.warning(f"⚠️ Ожидание задач: {e}")
 
-    # 4) Закрываем БД
     try:
         import database as db
         db.Session.remove()
@@ -139,21 +145,27 @@ async def shutdown_all() -> None:
         logger.warning(f"⚠️ Закрытие БД: {e}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                              ЗАПУСК                                          #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 async def main():
+    """
+    Основная точка входа: инициализация и запуск бота.
+
+    Порядок:
+      1. Проверка ключа шифрования.
+      2. Инициализация БД (создание таблиц, миграции, restore из бэкапа).
+      3. Регистрация middleware для проверки прав админа.
+      4. Регистрация всех хендлеров.
+      5. Уведомление админов о запуске.
+      6. Запуск infinity_polling.
+      7. Корректное завершение через shutdown_all.
+    """
     import database as db
 
     logger.info("=" * 60)
     logger.info("🚀 Запуск бота")
     logger.info("=" * 60)
 
-    # 1) Проверка ключа шифрования
     check_encryption_key()
 
-    # 2) Инициализация БД
     try:
         db.init_db()
         logger.info("✅ БД инициализирована")
@@ -161,25 +173,21 @@ async def main():
         logger.exception(f"❌ Ошибка БД: {e}")
         return
 
-    # 3) Middleware — ДО регистрации хендлеров
     try:
         bot.setup_middleware(AdminMiddleware())
         logger.info("✅ Middleware зарегистрирован")
     except Exception as e:
         logger.warning(f"⚠️ Middleware: {e}")
 
-    # 4) Регистрация хендлеров
     register_handlers(bot)
     logger.info("✅ Хендлеры зарегистрированы")
 
-    # 5) Уведомление админов
     try:
         await notify_startup()
         logger.info("✅ Уведомление отправлено")
     except Exception as e:
         logger.warning(f"⚠️ Уведомление: {e}")
 
-    # 6) Polling
     logger.info("✅ Polling...")
     try:
         await bot.infinity_polling(
@@ -196,6 +204,12 @@ async def main():
 
 
 def run():
+    """
+    Синхронная обёртка для запуска asyncio-цикла.
+
+    Ловит KeyboardInterrupt и SystemExit при остановке, а также
+    любые критические ошибки. Всё логируется.
+    """
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):

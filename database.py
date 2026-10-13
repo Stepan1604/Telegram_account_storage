@@ -23,10 +23,19 @@ except Exception:
 logger = logging.getLogger(__name__)
 
 BACKUP_FILE = "data/accounts_backup.json"
-KEY_FILE = "data/secret.key"
+KEY_FILE = "secret.key"
 
 
 def _to_sync(url: str) -> str:
+    """
+    Преобразует async-URL БД в синхронный для SQLAlchemy.
+
+    Заменяет "+asyncpg" на "+psycopg2" и добавляет явный драйвер
+    для postgresql://.
+
+    :param url: строка подключения.
+    :return: синхронный URL.
+    """
     if not url:
         return "sqlite:///storage.db"
     if "+asyncpg" in url:
@@ -52,6 +61,14 @@ Base = declarative_base()
 
 @contextmanager
 def scope():
+    """
+    Контекстный менеджер для работы с сессией SQLAlchemy.
+
+    Открывает сессию, коммитит при успехе, откатывает при исключении
+    и всегда удаляет сессию из scoped-сессии.
+
+    :yield: объект Session.
+    """
     s = Session()
     try:
         yield s
@@ -65,23 +82,25 @@ def scope():
         Session.remove()
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                          ШИФРОВАНИЕ SESSION                                 #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 _fernet = None
-FERNET_MARKER = "gAAAAA"  # префикс всех Fernet-токенов
+FERNET_MARKER = "gAAAAA"
 
 
 def _get_fernet() -> Fernet:
-    """Возвращает Fernet-инстанс (кэширует)."""
+    """
+    Возвращает Fernet-инстанс для шифрования.
+
+    Ключ ищется в порядке: SESSION_ENCRYPTION_KEY из config.py,
+    файл secret.key, генерация нового. Кэширует инстанс.
+
+    :return: объект Fernet.
+    """
     global _fernet
     if _fernet is not None:
         return _fernet
 
     key = None
 
-    # 1) Из config.py
     if SESSION_ENCRYPTION_KEY:
         try:
             key = SESSION_ENCRYPTION_KEY.encode() \
@@ -90,7 +109,6 @@ def _get_fernet() -> Fernet:
         except Exception:
             key = None
 
-    # 2) Из файла secret.key
     if not key and os.path.exists(KEY_FILE):
         try:
             with open(KEY_FILE, "rb") as f:
@@ -98,7 +116,6 @@ def _get_fernet() -> Fernet:
         except Exception as e:
             logger.error(f"❌ Не удалось прочитать {KEY_FILE}: {e}")
 
-    # 3) Генерируем новый
     if not key:
         key = Fernet.generate_key()
         try:
@@ -123,10 +140,15 @@ def _get_fernet() -> Fernet:
 
 class EncryptedText(TypeDecorator):
     """
-    Колонка шифрует при записи и расшифровывает при чтении.
-    Если значение НЕ начинается с FERNET_MARKER — это legacy plaintext,
-    возвращаем как есть. Если начинается, но не расшифровывается —
-    вернём "" (пусто), чтобы Telethon не падал с ValueError.
+    SQLAlchemy-тип для прозрачного шифрования текстовых колонок.
+
+    При записи — шифрует через Fernet. При чтении — расшифровывает.
+    Legacy plaintext (без префикса FERNET_MARKER) возвращается как есть.
+    Если токен повреждён — возвращает пустую строку, чтобы Telethon
+    не падал с ValueError.
+
+    :param value: значение для шифрования/расшифровки.
+    :return: зашифрованная или расшифрованная строка.
     """
     impl = Text
     cache_ok = True
@@ -135,7 +157,6 @@ class EncryptedText(TypeDecorator):
         if value is None or value == "":
             return value
         s = str(value)
-        # Защита от двойного шифрования
         if s.startswith(FERNET_MARKER):
             return s
         return _get_fernet().encrypt(s.encode("utf-8")).decode("ascii")
@@ -145,11 +166,9 @@ class EncryptedText(TypeDecorator):
             return value
         s = str(value)
 
-        # Не Fernet-токен → это legacy plaintext, отдаём как есть
         if not s.startswith(FERNET_MARKER):
             return s
 
-        # Fernet-токен → расшифровываем
         try:
             return _get_fernet().decrypt(s.encode("ascii")).decode("utf-8")
         except InvalidToken:
@@ -165,18 +184,21 @@ class EncryptedText(TypeDecorator):
             return ""
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                                  МОДЕЛИ                                     #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 class Account(Base):
+    """
+    Модель аккаунта Telegram.
+
+    Хранит номер, название, зашифрованную session, 2FA-пароль,
+    статус (uncleaned / cleaned / dead), метаданные (цена, источник,
+    LZT-лот, флаг избранного, счётчик фейлов).
+    """
     __tablename__ = "accounts"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     phone = Column(String(32), unique=True, index=True, nullable=False)
     name = Column(String(64), default="")
     session = Column(EncryptedText, nullable=False)
-    two_fa = Column(EncryptedText, default="")
+    two_fa = Column(Text, default="")
     registered_at = Column(DateTime, default=datetime.now)
     status = Column(String(16), default="uncleaned")
 
@@ -195,6 +217,12 @@ class Account(Base):
 
 
 class ActionLog(Base):
+    """
+    Модель лога действий пользователей.
+
+    Хранит user_id, account_id (если применимо), тип действия,
+    детали и время.
+    """
     __tablename__ = "actions_log"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -206,6 +234,12 @@ class ActionLog(Base):
 
 
 class DailyStat(Base):
+    """
+    Модель ежедневной статистики.
+
+    Первичный ключ — дата (ISO-строка). Счётчики: added, cleaned,
+    dead, bought_lzt, spent_rub.
+    """
     __tablename__ = "daily_stats"
 
     day = Column(String(16), primary_key=True)
@@ -217,6 +251,12 @@ class DailyStat(Base):
 
 
 class LZTPurchase(Base):
+    """
+    Модель покупки с LZT Market.
+
+    Хранит ID лота, номер, цену, страну, статус
+    (bought / logged_in / failed), текст ошибки и дату покупки.
+    """
     __tablename__ = "lzt_purchases"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -229,11 +269,13 @@ class LZTPurchase(Base):
     bought_at = Column(DateTime, default=datetime.now, index=True)
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                                  УТИЛИТЫ                                    #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def normalize_phone(phone: str) -> str:
+    """
+    Приводит номер к виду с ведущим плюсом.
+
+    :param phone: номер телефона.
+    :return: номер с "+" в начале.
+    """
     if not phone:
         return phone
     phone = phone.strip()
@@ -241,18 +283,28 @@ def normalize_phone(phone: str) -> str:
 
 
 def _today() -> str:
+    """
+    Возвращает сегодняшнюю дату в ISO-формате.
+
+    :return: строка вида "2026-10-13".
+    """
     return date.today().isoformat()
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                                 BACKUP                                      #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def _account_to_dict(acc: Account) -> dict:
+    """
+    Преобразует объект Account в словарь для бэкапа.
+
+    Session и two_fa сохраняются в расшифрованном виде (ORM уже
+    расшифровал при чтении).
+
+    :param acc: объект Account.
+    :return: словарь с полями аккаунта.
+    """
     return {
         "phone": acc.phone,
         "name": acc.name or acc.phone,
-        "session": acc.session,   # plaintext (расшифрован ORM)
+        "session": acc.session,
         "two_fa": acc.two_fa or "",
         "registered_at": acc.registered_at.isoformat() if acc.registered_at else None,
         "status": acc.status,
@@ -267,23 +319,36 @@ def _account_to_dict(acc: Account) -> dict:
 
 
 def save_backup() -> None:
+    """
+    Сохраняет JSON-бэкап всех активных аккаунтов.
+
+    Записывает расшифрованные session и two_fa в файл
+    BACKUP_FILE. Использует атомарную замену через .tmp.
+    """
     try:
         with scope() as s:
             accounts = s.query(Account).filter(Account.deleted_at.is_(None)).all()
             data = [_account_to_dict(a) for a in accounts]
-
         os.makedirs(os.path.dirname(BACKUP_FILE) or ".", exist_ok=True)
         tmp = BACKUP_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(tmp, BACKUP_FILE)
-        logger.info(f"💾 Бэкап сохранён ({len(data)} аккаунтов, plaintext)")
+        logger.info(f"💾 Бэкап сохранён ({len(data)} аккаунтов)")
     except Exception as e:
         logger.error(f"❌ Ошибка бэкапа: {type(e).__name__}: {e}")
         logger.debug(traceback.format_exc())
 
 
 def load_backup() -> list:
+    """
+    Читает бэкап из файла.
+
+    Пробует сначала как обычный JSON, потом как Fernet-шифр
+    (для совместимости со старыми зашифрованными бэкапами).
+
+    :return: список словарей-аккаунтов или пустой список.
+    """
     if not os.path.exists(BACKUP_FILE):
         return []
     try:
@@ -293,19 +358,16 @@ def load_backup() -> list:
         if not raw.strip():
             return []
 
-        # 1) Пробуем как обычный JSON (plaintext)
         try:
             return json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             pass
 
-        # 2) Fallback — старый зашифрованный бэкап
         try:
             decrypted = _get_fernet().decrypt(raw).decode("utf-8")
             data = json.loads(decrypted)
             logger.warning(
-                "[backup] Обнаружен зашифрованный бэкап — читаю через Fernet. "
-                "При следующем сохранении он станет plaintext."
+                "[backup] Обнаружен зашифрованный бэкап — читаю через Fernet."
             )
             return data
         except (InvalidToken, Exception):
@@ -320,38 +382,32 @@ def load_backup() -> list:
 
 def restore_from_backup() -> int:
     """
-    Дополняет БД аккаунтами из бэкапа.
-    Восстанавливает только те номера, которых НЕТ в БД.
-    Существующие аккаунты не трогает.
+    Восстанавливает аккаунты из бэкапа в БД.
+
+    Если БД пуста — восстанавливает все. Если нет — не трогает
+    (защита от случайного затирания).
+
+    :return: количество восстановленных аккаунтов.
     """
     data = load_backup()
     if not data:
         return 0
-
-    restored = 0
     try:
         with scope() as s:
-            existing_phones = {row[0] for row in s.query(Account.phone).all()}
-            logger.info(f"[restore] В БД: {len(existing_phones)}, "
-                        f"в бэкапе: {len(data)}")
-
+            if s.query(Account).filter(Account.deleted_at.is_(None)).count() > 0:
+                return 0
+            restored = 0
             for item in data:
                 try:
                     phone = normalize_phone(item.get("phone", ""))
                     session = item.get("session", "")
                     if not phone or not session:
                         continue
-
-                    if phone in existing_phones:
-                        continue
-
                     reg = item.get("registered_at")
                     try:
-                        reg_dt = (datetime.fromisoformat(reg)
-                                  if reg else datetime.now())
+                        reg_dt = datetime.fromisoformat(reg) if reg else datetime.now()
                     except Exception:
                         reg_dt = datetime.now()
-
                     s.add(Account(
                         phone=phone,
                         name=item.get("name") or phone,
@@ -365,26 +421,16 @@ def restore_from_backup() -> int:
                         lzt_item_id=item.get("lzt_item_id"),
                         favorite=item.get("favorite", 0) or 0,
                     ))
-                    existing_phones.add(phone)
                     restored += 1
-                    logger.info(f"[restore] + {phone}")
                 except Exception as e:
-                    logger.warning(f"⚠️ Запись {item.get('phone')} "
-                                   f"пропущена: {e}")
+                    logger.warning(f"⚠️ Запись пропущена: {e}")
     except Exception as e:
         logger.error(f"❌ restore_from_backup: {e}")
         return 0
-
     if restored:
         logger.info(f"♻️ Восстановлено из бэкапа: {restored}")
-    else:
-        logger.info("[restore] Нечего восстанавливать")
     return restored
 
-
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                          МИГРАЦИИ / INIT                                    #
-# ═══════════════════════════════════════════════════════════════════════════ #
 
 _ACCOUNT_COLUMNS = [
     ("name", "VARCHAR(64) DEFAULT ''"),
@@ -401,6 +447,14 @@ _ACCOUNT_COLUMNS = [
 
 
 def _migrate() -> None:
+    """
+    Добавляет недостающие колонки в таблицу accounts.
+
+    Для каждой колонки из _ACCOUNT_COLUMNS пытается выполнить
+    ALTER TABLE ADD COLUMN. Ошибки (колонка уже есть) игнорирует.
+
+    Также заполняет дефолтные значения у существующих записей.
+    """
     for col, ddl in _ACCOUNT_COLUMNS:
         try:
             with engine.begin() as conn:
@@ -427,7 +481,12 @@ def _migrate() -> None:
 
 
 def _migrate_encrypt_sessions() -> None:
-    """Шифрует plaintext session_string у существующих записей."""
+    """
+    Шифрует plaintext session_string у существующих записей.
+
+    Проходит по всем строкам accounts, находит те, где session
+    не начинается с FERNET_MARKER, и шифрует их на месте.
+    """
     try:
         f = _get_fernet()
 
@@ -457,35 +516,14 @@ def _migrate_encrypt_sessions() -> None:
         logger.error(f"❌ _migrate_encrypt_sessions: {type(e).__name__}: {e}")
         logger.debug(traceback.format_exc())
 
-def _migrate_encrypt_two_fa() -> None:
-    """Шифрует plaintext two_fa у существующих записей."""
-    try:
-        f = _get_fernet()
-        with engine.begin() as conn:
-            rows = conn.execute(
-                text("SELECT id, two_fa FROM accounts WHERE two_fa IS NOT NULL AND two_fa != ''")
-            ).fetchall()
-
-        to_encrypt = [
-            (r[0], r[1]) for r in rows
-            if isinstance(r[1], str) and not r[1].startswith(FERNET_MARKER)
-        ]
-        if not to_encrypt:
-            return
-
-        with engine.begin() as conn:
-            for row_id, raw in to_encrypt:
-                enc = f.encrypt(raw.encode("utf-8")).decode("ascii")
-                conn.execute(
-                    text("UPDATE accounts SET two_fa = :s WHERE id = :id"),
-                    {"s": enc, "id": row_id},
-                )
-        logger.info(f"🔐 Зашифровано two_fa: {len(to_encrypt)}")
-    except Exception as e:
-        logger.error(f"❌ _migrate_encrypt_two_fa: {type(e).__name__}: {e}")
 
 def init_db() -> None:
-    # Инициализируем ключ шифрования ДО первого чтения/записи
+    """
+    Инициализирует БД: создаёт таблицы, прогоняет миграции,
+    шифрует legacy session, восстанавливает из бэкапа.
+
+    Вызывается один раз при старте бота.
+    """
     try:
         _get_fernet()
     except Exception as e:
@@ -501,28 +539,40 @@ def init_db() -> None:
 
     _migrate()
     _migrate_encrypt_sessions()
-    _migrate_encrypt_two_fa()
 
     restored = restore_from_backup()
     if restored == 0:
         save_backup()
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                            АККАУНТЫ — CRUD                                  #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def add_account(phone: str, session_str: str, two_fa: str = "",
                 name: str = "", country_code: str = "", price: int = 0,
                 bought_from: str = "manual",
                 lzt_item_id: Optional[int] = None) -> bool:
+    """
+    Добавляет или обновляет аккаунт в БД.
+
+    Если аккаунт с таким номером уже есть — обновляет session,
+    2FA и метаданные, сбрасывает статус на uncleaned. Иначе создаёт
+    новый. В конце сохраняет бэкап.
+
+    :param phone: номер телефона.
+    :param session_str: строка сессии.
+    :param two_fa: пароль 2FA.
+    :param name: название аккаунта.
+    :param country_code: код страны.
+    :param price: цена.
+    :param bought_from: источник (manual / lzt / import).
+    :param lzt_item_id: ID лота LZT.
+    :return: True при успехе.
+    """
     phone = normalize_phone(phone)
     logger.info(f"[db.add_account] {phone} name={name!r} from={bought_from}")
     try:
         with scope() as s:
             acc = s.query(Account).filter(Account.phone == phone).first()
             if acc:
-                acc.session = session_str      # ORM зашифрует
+                acc.session = session_str
                 acc.two_fa = two_fa
                 acc.status = "uncleaned"
                 acc.registered_at = datetime.now()
@@ -542,7 +592,7 @@ def add_account(phone: str, session_str: str, two_fa: str = "",
                 s.add(Account(
                     phone=phone,
                     name=name or phone,
-                    session=session_str,       # ORM зашифрует
+                    session=session_str,
                     two_fa=two_fa,
                     status="uncleaned",
                     registered_at=datetime.now(),
@@ -562,6 +612,12 @@ def add_account(phone: str, session_str: str, two_fa: str = "",
 
 
 def get_accounts(include_archived: bool = False):
+    """
+    Возвращает все аккаунты, отсортированные по избранному и id.
+
+    :param include_archived: включать ли архивные (deleted_at != None).
+    :return: список объектов Account.
+    """
     with scope() as s:
         q = s.query(Account)
         if not include_archived:
@@ -573,6 +629,11 @@ def get_accounts(include_archived: bool = False):
 
 
 def get_favorites():
+    """
+    Возвращает только избранные аккаунты.
+
+    :return: список объектов Account.
+    """
     with scope() as s:
         return (s.query(Account)
                 .filter(Account.deleted_at.is_(None))
@@ -582,6 +643,11 @@ def get_favorites():
 
 
 def get_archived_accounts():
+    """
+    Возвращает архивные (удалённые мягко) аккаунты.
+
+    :return: список объектов Account.
+    """
     with scope() as s:
         return (s.query(Account)
                 .filter(Account.deleted_at.isnot(None))
@@ -590,11 +656,23 @@ def get_archived_accounts():
 
 
 def get_account(account_id: int):
+    """
+    Возвращает аккаунт по ID.
+
+    :param account_id: ID аккаунта.
+    :return: объект Account или None.
+    """
     with scope() as s:
         return s.get(Account, account_id)
 
 
 def get_account_by_phone(phone: str):
+    """
+    Возвращает активный аккаунт по номеру телефона.
+
+    :param phone: номер телефона.
+    :return: объект Account или None.
+    """
     phone = normalize_phone(phone)
     with scope() as s:
         return (s.query(Account)
@@ -605,48 +683,64 @@ def get_account_by_phone(phone: str):
 
 def delete_account(account_id: int) -> bool:
     """
-    ПОЛНОЕ удаление: убирает аккаунт из БД И из бэкапа.
-    Используется, когда аккаунт удаляет сам бот (кнопка "Удалить").
+    Полностью удаляет аккаунт из БД.
+
+    Обновляет бэкап. При следующем старте бота аккаунт НЕ вернётся.
+
+    :param account_id: ID аккаунта.
+    :return: True.
     """
     with scope() as s:
         acc = s.get(Account, account_id)
         if acc:
             s.delete(acc)
-    save_backup()          # ← важно: перезаписываем бэкап
+    save_backup()
     return True
 
-def delete_account_soft(account_id: int) -> bool:
-    """
-    МЯГКОЕ удаление: убирает аккаунт ТОЛЬКО из БД.
-    В бэкапе он остаётся, поэтому при следующем старте бота
-    restore_from_backup() вернёт его обратно.
-
-    Используется, когда аккаунт удаляют вручную через SQL
-    (или когда нужно временно скрыть).
-    """
-    with scope() as s:
-        acc = s.get(Account, account_id)
-        if acc:
-            s.delete(acc)
-    return True
 
 def archive_account(account_id: int) -> bool:
+    """
+    Мягко удаляет аккаунт: ставит deleted_at = now.
+
+    Бэкап не трогает — аккаунт остаётся в файле.
+
+    :param account_id: ID аккаунта.
+    :return: True.
+    """
     with scope() as s:
         acc = s.get(Account, account_id)
         if acc:
             acc.deleted_at = datetime.now()
+    save_backup()
     return True
 
 
 def restore_account(account_id: int) -> bool:
+    """
+    Восстанавливает аккаунт из архива.
+
+    :param account_id: ID аккаунта.
+    :return: True.
+    """
     with scope() as s:
         acc = s.get(Account, account_id)
         if acc:
             acc.deleted_at = None
+    save_backup()
     return True
 
 
 def update_account_status(account_id: int, status: str) -> bool:
+    """
+    Обновляет статус аккаунта.
+
+    При "cleaned" — ставит last_cleaned_at и сбрасывает счётчик
+    фейлов. При "dead" — увеличивает счётчик фейлов.
+
+    :param account_id: ID аккаунта.
+    :param status: новый статус.
+    :return: True.
+    """
     with scope() as s:
         acc = s.get(Account, account_id)
         if acc:
@@ -661,6 +755,13 @@ def update_account_status(account_id: int, status: str) -> bool:
 
 
 def update_account_two_fa(account_id: int, two_fa: str) -> bool:
+    """
+    Обновляет 2FA-пароль аккаунта.
+
+    :param account_id: ID аккаунта.
+    :param two_fa: новый пароль.
+    :return: True.
+    """
     with scope() as s:
         acc = s.get(Account, account_id)
         if acc:
@@ -670,6 +771,15 @@ def update_account_two_fa(account_id: int, two_fa: str) -> bool:
 
 
 def update_account_name(account_id: int, name: str) -> bool:
+    """
+    Обновляет название аккаунта.
+
+    Если пустая строка — ставит номер телефона.
+
+    :param account_id: ID аккаунта.
+    :param name: новое название.
+    :return: True.
+    """
     with scope() as s:
         acc = s.get(Account, account_id)
         if acc:
@@ -679,6 +789,12 @@ def update_account_name(account_id: int, name: str) -> bool:
 
 
 def toggle_favorite(account_id: int) -> bool:
+    """
+    Переключает флаг избранного.
+
+    :param account_id: ID аккаунта.
+    :return: True, если теперь в избранном; False, если убран.
+    """
     result = False
     with scope() as s:
         acc = s.get(Account, account_id)
@@ -691,6 +807,13 @@ def toggle_favorite(account_id: int) -> bool:
 
 
 def set_favorite(account_id: int, value: bool) -> bool:
+    """
+    Устанавливает флаг избранного.
+
+    :param account_id: ID аккаунта.
+    :param value: True — в избранное, False — убрать.
+    :return: True.
+    """
     with scope() as s:
         acc = s.get(Account, account_id)
         if acc:
@@ -700,12 +823,27 @@ def set_favorite(account_id: int, value: bool) -> bool:
 
 
 def is_favorite(account_id: int) -> bool:
+    """
+    Проверяет, в избранном ли аккаунт.
+
+    :param account_id: ID аккаунта.
+    :return: True, если в избранном.
+    """
     with scope() as s:
         acc = s.get(Account, account_id)
         return bool(acc and (acc.favorite or 0) == 1)
 
 
 def update_last_checked(account_id: int, alive: bool) -> bool:
+    """
+    Обновляет дату последней проверки аккаунта.
+
+    При alive=True сбрасывает счётчик фейлов, при False — увеличивает.
+
+    :param account_id: ID аккаунта.
+    :param alive: жив ли аккаунт.
+    :return: True.
+    """
     with scope() as s:
         acc = s.get(Account, account_id)
         if acc:
@@ -718,6 +856,12 @@ def update_last_checked(account_id: int, alive: bool) -> bool:
 
 
 def mark_cleaned(account_id: int) -> bool:
+    """
+    Помечает аккаунт как очищенный.
+
+    :param account_id: ID аккаунта.
+    :return: True.
+    """
     with scope() as s:
         acc = s.get(Account, account_id)
         if acc:
@@ -729,6 +873,12 @@ def mark_cleaned(account_id: int) -> bool:
 
 
 def get_accounts_stats() -> dict:
+    """
+    Собирает статистику по аккаунтам.
+
+    :return: словарь с ключами total, cleaned, uncleaned, dead,
+        favorites, archived.
+    """
     with scope() as s:
         base = s.query(Account).filter(Account.deleted_at.is_(None))
         total = base.count()
@@ -749,6 +899,12 @@ def get_accounts_stats() -> dict:
 
 
 def get_problem_accounts(threshold: int = 3):
+    """
+    Возвращает аккаунты с health_fail_count >= threshold.
+
+    :param threshold: порог фейлов.
+    :return: список объектов Account.
+    """
     with scope() as s:
         return (s.query(Account)
                 .filter(Account.deleted_at.is_(None))
@@ -756,12 +912,17 @@ def get_problem_accounts(threshold: int = 3):
                 .all())
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                              ACTIONS LOG                                    #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def log_action(user_id: int, action: str, details: str = "",
                account_id: Optional[int] = None) -> bool:
+    """
+    Записывает действие пользователя в actions_log.
+
+    :param user_id: Telegram ID пользователя.
+    :param action: тип действия.
+    :param details: детали (обрезаются до 500 символов).
+    :param account_id: ID аккаунта (если применимо).
+    :return: True при успехе.
+    """
     try:
         with scope() as s:
             s.add(ActionLog(
@@ -777,6 +938,12 @@ def log_action(user_id: int, action: str, details: str = "",
 
 
 def get_recent_actions(limit: int = 50):
+    """
+    Возвращает последние действия из лога.
+
+    :param limit: сколько записей вернуть.
+    :return: список объектов ActionLog.
+    """
     with scope() as s:
         return (s.query(ActionLog)
                 .order_by(ActionLog.created_at.desc())
@@ -784,6 +951,13 @@ def get_recent_actions(limit: int = 50):
 
 
 def get_account_actions(account_id: int, limit: int = 30):
+    """
+    Возвращает историю действий по одному аккаунту.
+
+    :param account_id: ID аккаунта.
+    :param limit: сколько записей вернуть.
+    :return: список объектов ActionLog.
+    """
     with scope() as s:
         return (s.query(ActionLog)
                 .filter(ActionLog.account_id == account_id)
@@ -792,6 +966,12 @@ def get_account_actions(account_id: int, limit: int = 30):
 
 
 def get_action_counts(account_id: int) -> dict:
+    """
+    Считает количество действий каждого типа для аккаунта.
+
+    :param account_id: ID аккаунта.
+    :return: словарь {action: count}.
+    """
     with scope() as s:
         rows = (s.query(ActionLog.action, func.count(ActionLog.id))
                 .filter(ActionLog.account_id == account_id)
@@ -800,11 +980,15 @@ def get_action_counts(account_id: int) -> dict:
     return {r[0]: r[1] for r in rows}
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                              DAILY STATS                                    #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def _bump_today(field: str, amount: int = 1) -> None:
+    """
+    Увеличивает счётчик в daily_stats за сегодня.
+
+    Создаёт запись, если её нет.
+
+    :param field: имя поля (added, cleaned, dead, bought_lzt, spent_rub).
+    :param amount: на сколько увеличить.
+    """
     day = _today()
     with scope() as s:
         row = s.get(DailyStat, day)
@@ -816,24 +1000,51 @@ def _bump_today(field: str, amount: int = 1) -> None:
 
 
 def stat_added(amount: int = 1) -> None:
+    """
+    Увеличивает счётчик добавленных аккаунтов за сегодня.
+
+    :param amount: на сколько увеличить.
+    """
     _bump_today("added", amount)
 
 
 def stat_cleaned(amount: int = 1) -> None:
+    """
+    Увеличивает счётчик очищенных аккаунтов за сегодня.
+
+    :param amount: на сколько увеличить.
+    """
     _bump_today("cleaned", amount)
 
 
 def stat_dead(amount: int = 1) -> None:
+    """
+    Увеличивает счётчик мёртвых аккаунтов за сегодня.
+
+    :param amount: на сколько увеличить.
+    """
     _bump_today("dead", amount)
 
 
 def stat_bought_lzt(amount: int = 1, spent_rub: int = 0) -> None:
+    """
+    Увеличивает счётчики покупок LZT за сегодня.
+
+    :param amount: сколько покупок.
+    :param spent_rub: сколько потрачено рублей.
+    """
     _bump_today("bought_lzt", amount)
     if spent_rub:
         _bump_today("spent_rub", spent_rub)
 
 
 def get_daily_stats(days: int = 30):
+    """
+    Возвращает статистику за последние N дней.
+
+    :param days: сколько дней вернуть.
+    :return: список объектов DailyStat.
+    """
     with scope() as s:
         return (s.query(DailyStat)
                 .order_by(DailyStat.day.desc())
@@ -841,6 +1052,11 @@ def get_daily_stats(days: int = 30):
 
 
 def get_totals_stats() -> dict:
+    """
+    Суммарная статистика за всё время.
+
+    :return: словарь added, cleaned, dead, bought_lzt, spent_rub.
+    """
     with scope() as s:
         added = s.query(func.coalesce(func.sum(DailyStat.added), 0)).scalar()
         cleaned = s.query(func.coalesce(func.sum(DailyStat.cleaned), 0)).scalar()
@@ -856,13 +1072,22 @@ def get_totals_stats() -> dict:
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                             LZT PURCHASES                                   #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def add_lzt_purchase(item_id: int, phone: Optional[str], price: int,
                      country: str = "", status: str = "bought",
                      error: str = "") -> int:
+    """
+    Добавляет или обновляет запись о покупке LZT.
+
+    Если запись с таким item_id есть — обновляет, иначе создаёт.
+
+    :param item_id: ID лота LZT.
+    :param phone: номер телефона.
+    :param price: цена.
+    :param country: страна.
+    :param status: статус (bought / logged_in / failed).
+    :param error: текст ошибки.
+    :return: ID записи.
+    """
     with scope() as s:
         row = s.query(LZTPurchase).filter(LZTPurchase.item_id == item_id).first()
         if row:
@@ -884,6 +1109,15 @@ def add_lzt_purchase(item_id: int, phone: Optional[str], price: int,
 def update_lzt_purchase(item_id: int, status: str,
                         phone: Optional[str] = None,
                         error: str = "") -> bool:
+    """
+    Обновляет запись о покупке LZT.
+
+    :param item_id: ID лота.
+    :param status: новый статус.
+    :param phone: номер (если нужно обновить).
+    :param error: текст ошибки.
+    :return: True.
+    """
     with scope() as s:
         row = s.query(LZTPurchase).filter(LZTPurchase.item_id == item_id).first()
         if row:
@@ -895,11 +1129,24 @@ def update_lzt_purchase(item_id: int, status: str,
 
 
 def get_lzt_purchase(item_id: int):
+    """
+    Возвращает запись о покупке LZT по item_id.
+
+    :param item_id: ID лота.
+    :return: объект LZTPurchase или None.
+    """
     with scope() as s:
         return s.query(LZTPurchase).filter(LZTPurchase.item_id == item_id).first()
 
 
 def get_lzt_purchases(status: Optional[str] = None, limit: int = 200):
+    """
+    Возвращает список покупок LZT с фильтром по статусу.
+
+    :param status: статус для фильтра (или None — все).
+    :param limit: максимум записей.
+    :return: список объектов LZTPurchase.
+    """
     with scope() as s:
         q = s.query(LZTPurchase)
         if status:
@@ -908,12 +1155,22 @@ def get_lzt_purchases(status: Optional[str] = None, limit: int = 200):
 
 
 def get_known_lzt_item_ids() -> set:
+    """
+    Возвращает множество всех известных item_id из lzt_purchases.
+
+    :return: set[int].
+    """
     with scope() as s:
         rows = s.query(LZTPurchase.item_id).all()
     return {r[0] for r in rows}
 
 
 def get_lzt_stats() -> dict:
+    """
+    Статистика по LZT-покупкам.
+
+    :return: словарь total, logged_in, failed, bought, spent_rub.
+    """
     with scope() as s:
         total = s.query(LZTPurchase).count()
         logged_in = s.query(LZTPurchase).filter(

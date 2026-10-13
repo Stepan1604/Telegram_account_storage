@@ -25,15 +25,30 @@ logger = logging.getLogger(__name__)
 
 
 def register(ctx):
-    bot = ctx.bot
+    """
+    Регистрирует хендлеры добавления и переименования аккаунтов.
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ШАГ 1 — ИМЯ АККАУНТА                            #
-    # ═══════════════════════════════════════════════════════════════════ #
+    Флоу добавления состоит из 4 шагов: имя → номер → код → 2FA.
+    В конце вызывается _finalize_add, который сохраняет аккаунт в БД
+    и планирует автоочистку. Также сюда входит FSM переименования
+    и общий text_router для текстовых сообщений.
+
+    :param ctx: объект Context с общим состоянием.
+    """
+    bot = ctx.bot
 
     @bot.callback_query_handler(func=lambda c: c.data == "add_account")
     @admin_required
     async def cb_add(call: types.CallbackQuery):
+        """
+        Начинает флоу добавления аккаунта — шаг 1 (ввод имени).
+
+        Сбрасывает предыдущее pending_names, переводит пользователя
+        в состояние add_name_pre, показывает инструкцию и заметку
+        о 2FA.
+
+        :param call: callback_query от кнопки "➕ ДОБАВИТЬ АККАУНТ".
+        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
 
@@ -59,6 +74,16 @@ def register(ctx):
         await edit_or_send(bot, call, text, kbd.cancel())
 
     async def state_add_name_pre(message, state):
+        """
+        Шаг 1: принимает имя аккаунта или "-" для дефолтного.
+
+        Валидирует длину (до 64 символов), сохраняет в pending_names
+        (или None, если дефолт), переводит пользователя в состояние
+        add_phone.
+
+        :param message: объект Message с именем.
+        :param state: текущее FSM-состояние пользователя.
+        """
         uid = message.from_user.id
         raw = (message.text or "").strip()
 
@@ -87,11 +112,16 @@ def register(ctx):
         await bot.send_message(message.chat.id, text,
                                reply_markup=kbd.cancel())
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ШАГ 2 — НОМЕР                                    #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def state_add_phone(message, state):
+        """
+        Шаг 2: принимает номер телефона и отправляет код.
+
+        Валидирует формат, вызывает start_login, сохраняет клиент и
+        хэш кода в pending_signins, переводит в состояние add_code.
+
+        :param message: объект Message с номером.
+        :param state: текущее FSM-состояние пользователя.
+        """
         uid = message.from_user.id
         phone = fmt_phone(message.text.strip())
 
@@ -134,11 +164,17 @@ def register(ctx):
         await bot.send_message(message.chat.id, text,
                                reply_markup=kbd.cancel())
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ШАГ 3 — КОД                                     #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def state_add_code(message, state):
+        """
+        Шаг 3: принимает код из Telegram.
+
+        Вызывает confirm_code. Если вход удался — идёт в _apply_post_login
+        и _finalize_add. Если нужен 2FA — переводит в состояние add_2fa.
+        При ошибке — показывает сообщение.
+
+        :param message: объект Message с кодом.
+        :param state: текущее FSM-состояние пользователя.
+        """
         uid = message.from_user.id
         code = message.text.strip().replace(" ", "")
 
@@ -179,11 +215,16 @@ def register(ctx):
 
         await bot.send_message(message.chat.id, f"❌ {msg}")
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ШАГ 4 — 2FA                                     #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def state_add_2fa(message, state):
+        """
+        Шаг 4: принимает пароль 2FA.
+
+        Вызывает confirm_2fa, после успеха идёт в _apply_post_login
+        и _finalize_add.
+
+        :param message: объект Message с паролем 2FA.
+        :param state: текущее FSM-состояние пользователя.
+        """
         uid = message.from_user.id
         password = message.text.strip()
 
@@ -204,17 +245,18 @@ def register(ctx):
         )
         await _finalize_add(message, uid, data, session, two_fa_value)
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       ПОСТ-ЛОГИН (только 2FA)                         #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def _apply_post_login(message, data, password_used: str):
         """
-        После успешного входа:
-          Устанавливает/меняет 2FA-пароль на PASSWORD_2FA из config.
-        Возвращает (session, two_fa_value).
-        НИКОГДА не бросает исключение наружу — все ошибки логируются и
-        сообщаются пользователю, но сохранение продолжается.
+        Пост-логин: устанавливает или меняет 2FA-пароль из config.
+
+        Все ошибки логируются и сообщаются пользователю, но не
+        прерывают сохранение. Возвращает актуальную session (после
+        edit_2fa она меняется) и итоговое значение 2FA.
+
+        :param message: объект Message для отправки уведомлений.
+        :param data: словарь из pending_signins с клиентом и номером.
+        :param password_used: пароль, введённый пользователем (если был).
+        :return: (session_string, two_fa_value).
         """
         two_fa_value = password_used or ""
         session = ""
@@ -224,7 +266,6 @@ def register(ctx):
         except Exception as e:
             logger.error(f"[post_login] save #1: {e}")
 
-        # ── 2FA ──
         if PASSWORD_2FA:
             try:
                 if not password_used:
@@ -266,7 +307,6 @@ def register(ctx):
                 logger.error(f"[auto_2fa] {data['phone']}: "
                              f"{type(e).__name__}: {e}")
 
-        # Пересохраняем session (после edit_2fa она меняется)
         try:
             session = data["client"].session.save()
         except Exception as e:
@@ -274,16 +314,24 @@ def register(ctx):
 
         return session, two_fa_value
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       СОХРАНЕНИЕ В БД                                 #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def _finalize_add(message, uid, data, session, two_fa_value):
+        """
+        Сохраняет аккаунт в БД, закрывает клиент, планирует автоочистку.
+
+        Если сохранение не удалось — уведомляет пользователя и
+        закрывает подвисший клиент. При успехе показывает финальную
+        карточку с кнопками перехода к аккаунту, хранилищу и меню.
+
+        :param message: объект Message для ответа.
+        :param uid: Telegram ID пользователя.
+        :param data: словарь из pending_signins.
+        :param session: строка сессии.
+        :param two_fa_value: финальное значение 2FA.
+        """
         name_val = ctx.pending_names.get(uid)
         final_name = name_val or data["phone"]
         phone = fmt_phone(data["phone"])
 
-        # ── Сохранение ──
         saved = False
         db_error = ""
         try:
@@ -297,7 +345,6 @@ def register(ctx):
                 db_error = "add_account вернул False"
                 logger.error(f"[db] add_account({phone}) → False")
         except TypeError as e:
-            # Fallback для старой версии database.py без параметра name
             db_error = f"TypeError: {e}"
             logger.error(f"[db] add_account TypeError: {e}")
             try:
@@ -311,7 +358,6 @@ def register(ctx):
                          f"{type(e).__name__}: {e}")
             logger.debug(traceback.format_exc())
 
-        # ── Проверка, что аккаунт действительно в БД ──
         acc = None
         try:
             acc = db.get_account_by_phone(phone)
@@ -327,7 +373,6 @@ def register(ctx):
                 f"📞 {phone}\n\n"
                 f"Ошибка: {db_error or 'аккаунт не найден'}",
             )
-            # Закрываем подвисший клиент
             client = data.get("client")
             if client:
                 await _safe_disconnect(client)
@@ -336,15 +381,12 @@ def register(ctx):
             ctx.user_state.pop(uid, None)
             return
 
-        # ── Успех ──
         logger.info(f"[finalize] {phone}: сохранён id={acc.id}")
 
-        # Закрываем клиент добавления (он не в кэше _clients)
         client = data.get("client")
         if client:
             await _safe_disconnect(client)
 
-        # Планируем автоочистку
         if ctx.schedule_auto_clean:
             try:
                 ctx.schedule_auto_clean(acc.id)
@@ -383,11 +425,16 @@ def register(ctx):
         except Exception as e:
             logger.error(f"[finalize] send: {type(e).__name__}: {e}")
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                       FSM: ПЕРЕИМЕНОВАНИЕ                             #
-    # ═══════════════════════════════════════════════════════════════════ #
-
     async def state_rename_account(message, state):
+        """
+        FSM-обработчик переименования аккаунта.
+
+        Принимает новое имя, валидирует длину, обновляет в БД,
+        логирует действие и показывает карточку с новым названием.
+
+        :param message: объект Message с новым именем.
+        :param state: словарь с acc_id и page.
+        """
         uid = message.from_user.id
         new_name = (message.text or "").strip()
         acc_id = state.get("acc_id")
@@ -429,11 +476,6 @@ def register(ctx):
             ]),
         )
 
-    # ═══════════════════════════════════════════════════════════════════ #
-    #                          TEXT ROUTER                                  #
-    # ═══════════════════════════════════════════════════════════════════ #
-
-    # Локальные FSM-хендлеры
     local_handlers = {
         "add_name_pre": state_add_name_pre,
         "add_phone": state_add_phone,
@@ -445,16 +487,27 @@ def register(ctx):
     @bot.message_handler(func=lambda m: True, content_types=["text"])
     @admin_required
     async def text_router(message: types.Message):
+        """
+        Централизованный роутер текстовых сообщений.
+
+        Определяет, в каком FSM-состоянии находится пользователь,
+        и вызывает соответствующий обработчик. Объединяет локальные
+        хендлеры этого модуля и FSM из lzt_buy через
+        ctx._buy_state_handlers.
+
+        Если пользователь не в состоянии — подсказывает /start.
+        Команды (начинающиеся на "/") игнорирует.
+
+        :param message: объект Message с текстом.
+        """
         uid = message.from_user.id
 
-        # Игнорируем команды (/start, /admin и т.д.)
         if message.text and message.text.startswith("/"):
             return
 
         state = ctx.user_state.get(uid, {})
         state_name = state.get("state")
 
-        # Объединяем локальные и FSM из lzt_buy
         all_handlers = dict(local_handlers)
         all_handlers.update(getattr(ctx, "_buy_state_handlers", {}))
 
@@ -471,5 +524,4 @@ def register(ctx):
                                        f"❌ {str(e)[:150]}")
             return
 
-        # Нет активного состояния — подсказываем /start
         await bot.send_message(message.chat.id, "Используйте /start")

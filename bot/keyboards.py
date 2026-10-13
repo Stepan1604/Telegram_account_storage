@@ -1,23 +1,33 @@
 from telebot import types
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                              ХЕЛПЕРЫ                                         #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def btn(text: str, cb: str) -> types.InlineKeyboardButton:
+    """
+    Создаёт inline-кнопку с текстом и callback-данными.
+
+    :param text: текст на кнопке.
+    :param cb: callback_data, которая отправится при нажатии.
+    :return: объект InlineKeyboardButton.
+    """
     return types.InlineKeyboardButton(text=text, callback_data=cb)
 
 
 def kb(rows) -> types.InlineKeyboardMarkup:
+    """
+    Собирает клавиатуру из списка рядов кнопок.
+
+    :param rows: список списков InlineKeyboardButton.
+    :return: объект InlineKeyboardMarkup.
+    """
     return types.InlineKeyboardMarkup(rows)
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                              ГЛАВНОЕ МЕНЮ                                    #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def main_menu() -> types.InlineKeyboardMarkup:
+    """
+    Главное меню бота.
+
+    :return: InlineKeyboardMarkup с кнопками основных разделов.
+    """
     return kb([
         [btn("📦 ХРАНИЛИЩЕ", "storage")],
         [btn("⭐ ИЗБРАННОЕ", "favorites")],
@@ -31,19 +41,37 @@ def main_menu() -> types.InlineKeyboardMarkup:
 
 
 def back_main() -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура с одной кнопкой возврата в главное меню.
+
+    :return: InlineKeyboardMarkup.
+    """
     return kb([[btn("🏠 ГЛАВНОЕ МЕНЮ", "main_menu")]])
 
 
 def cancel() -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура с кнопкой отмены действия.
+
+    :return: InlineKeyboardMarkup.
+    """
     return kb([[btn("🔙 ОТМЕНА", "main_menu")]])
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                          ХРАНИЛИЩЕ / ИЗБРАННОЕ                               #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def storage_page(accounts, page: int, total_pages: int,
                  page_size: int = 5) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура страницы хранилища.
+
+    Формирует список аккаунтов с эмодзи статуса и звёздочкой избранного,
+    навигацию ⬅️/➡️ и кнопку возврата в меню.
+
+    :param accounts: список объектов Account для текущей страницы.
+    :param page: номер текущей страницы (0-индексация).
+    :param total_pages: всего страниц.
+    :param page_size: количество аккаунтов на странице.
+    :return: InlineKeyboardMarkup.
+    """
     rows = []
     for acc in accounts:
         emoji = {
@@ -70,6 +98,17 @@ def storage_page(accounts, page: int, total_pages: int,
 
 def favorites_page(accounts, page: int, total_pages: int,
                    page_size: int = 5) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура страницы избранного.
+
+    Аналогична storage_page, но все кнопки со звёздочкой.
+
+    :param accounts: список объектов Account для текущей страницы.
+    :param page: номер текущей страницы.
+    :param total_pages: всего страниц.
+    :param page_size: количество аккаунтов на странице.
+    :return: InlineKeyboardMarkup.
+    """
     rows = []
     for acc in accounts:
         emoji = {
@@ -93,11 +132,17 @@ def favorites_page(accounts, page: int, total_pages: int,
     return kb(rows)
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                          КАРТОЧКА АККАУНТА                                    #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def account_card(acc, page: int) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура карточки аккаунта.
+
+    Кнопки: получить код, обновить инфо, очистить сессии/чаты,
+    отчёт, экспорт, избранное, переименование, смена статуса, удаление.
+
+    :param acc: объект Account.
+    :param page: номер страницы хранилища, с которой пришли.
+    :return: InlineKeyboardMarkup.
+    """
     current = acc.name or acc.phone
     if (acc.favorite or 0) == 1:
         fav_label = "★ УБРАТЬ ИЗ ИЗБРАННОГО"
@@ -120,6 +165,13 @@ def account_card(acc, page: int) -> types.InlineKeyboardMarkup:
 
 
 def status_menu(acc_id: int, page: int) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура выбора нового статуса аккаунта.
+
+    :param acc_id: ID аккаунта.
+    :param page: номер страницы хранилища.
+    :return: InlineKeyboardMarkup.
+    """
     return kb([
         [btn("🧹 Очищен от чужих сессий",
              f"acc_status_set_{acc_id}_cleaned_{page}")],
@@ -132,17 +184,25 @@ def status_menu(acc_id: int, page: int) -> types.InlineKeyboardMarkup:
 
 
 def confirm_delete(acc_id: int, page: int) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура подтверждения удаления аккаунта.
+
+    :param acc_id: ID аккаунта.
+    :param page: номер страницы хранилища.
+    :return: InlineKeyboardMarkup.
+    """
     return kb([
         [btn("✅ ДА, УДАЛИТЬ", f"acc_del_yes_{acc_id}_{page}")],
         [btn("❌ ОТМЕНА", f"acc_view_{acc_id}_{page}")],
     ])
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                              ОТЧЁТЫ                                          #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def reports_menu() -> types.InlineKeyboardMarkup:
+    """
+    Меню отчётов.
+
+    :return: InlineKeyboardMarkup.
+    """
     return kb([
         [btn("📊 ОБЩИЙ ОТЧЁТ", "report_total")],
         [btn("📅 ЗА 30 ДНЕЙ", "report_30d")],
@@ -156,6 +216,15 @@ def reports_menu() -> types.InlineKeyboardMarkup:
 
 def reports_accounts_page(accounts, page: int, total_pages: int,
                           page_size: int = 6) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура страницы отчётов по аккаунтам.
+
+    :param accounts: список аккаунтов для текущей страницы.
+    :param page: номер страницы.
+    :param total_pages: всего страниц.
+    :param page_size: количество аккаунтов на странице.
+    :return: InlineKeyboardMarkup.
+    """
     rows = []
     for acc in accounts:
         label = acc.name or acc.phone
@@ -173,6 +242,13 @@ def reports_accounts_page(accounts, page: int, total_pages: int,
 
 
 def account_report_kb(acc, page: int = 0) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура под отчётом по одному аккаунту.
+
+    :param acc: объект Account.
+    :param page: номер страницы для возврата.
+    :return: InlineKeyboardMarkup.
+    """
     return kb([
         [btn("📜 История действий", f"acc_history_{acc.id}_{page}")],
         [btn("📤 Экспорт этого аккаунта", f"acc_export_{acc.id}_{page}")],
@@ -183,6 +259,13 @@ def account_report_kb(acc, page: int = 0) -> types.InlineKeyboardMarkup:
 
 
 def account_history_kb(acc_id: int, page: int) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура под историей действий аккаунта.
+
+    :param acc_id: ID аккаунта.
+    :param page: номер страницы для возврата.
+    :return: InlineKeyboardMarkup.
+    """
     return kb([
         [btn("🔄 ОБНОВИТЬ", f"acc_history_{acc_id}_{page}")],
         [btn("📤 ЭКСПОРТ ИСТОРИИ", f"acc_history_export_{acc_id}_{page}")],
@@ -190,11 +273,12 @@ def account_history_kb(acc_id: int, page: int) -> types.InlineKeyboardMarkup:
     ])
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                              LZT-ЛОГИ                                        #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def lzt_logs_menu() -> types.InlineKeyboardMarkup:
+    """
+    Меню LZT-логов.
+
+    :return: InlineKeyboardMarkup.
+    """
     return kb([
         [btn("📥 ВСЕ ПОКУПКИ", "lzt_logs_all")],
         [btn("🟢 ВОШЁЛ В АККАУНТ", "lzt_logs_logged")],
@@ -206,6 +290,18 @@ def lzt_logs_menu() -> types.InlineKeyboardMarkup:
 
 def lzt_logs_page(items, page: int, total_pages: int, filter_type: str,
                   page_size: int = 5) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура страницы LZT-логов.
+
+    Формирует список записей с эмодзи статуса, навигацию и кнопку назад.
+
+    :param items: список объектов LZTPurchase для текущей страницы.
+    :param page: номер текущей страницы.
+    :param total_pages: всего страниц.
+    :param filter_type: фильтр ("all", "logged", "failed", "bought").
+    :param page_size: количество записей на странице.
+    :return: InlineKeyboardMarkup.
+    """
     rows = []
     for it in items:
         icon = {
@@ -232,6 +328,15 @@ def lzt_logs_page(items, page: int, total_pages: int, filter_type: str,
 
 def lzt_log_detail_kb(item_id: int, filter_type: str, page: int,
                       can_retry: bool = False) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура деталей одной LZT-записи.
+
+    :param item_id: ID лота LZT.
+    :param filter_type: фильтр, с которого пришли.
+    :param page: номер страницы, с которой пришли.
+    :param can_retry: показывать ли кнопку повторного входа.
+    :return: InlineKeyboardMarkup.
+    """
     rows = []
     if can_retry:
         rows.append([
@@ -244,11 +349,12 @@ def lzt_log_detail_kb(item_id: int, filter_type: str, page: int,
     return kb(rows)
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                          ПРОВЕРКА / ОЧИСТКА                                  #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def confirm_clean() -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура подтверждения массовой очистки.
+
+    :return: InlineKeyboardMarkup.
+    """
     return kb([
         [btn("✅ ДА, ОЧИСТИТЬ", "clean_confirm")],
         [btn("❌ ОТМЕНА", "main_menu")],
@@ -256,6 +362,12 @@ def confirm_clean() -> types.InlineKeyboardMarkup:
 
 
 def confirm_del_dead(count: int) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура подтверждения удаления мёртвых аккаунтов.
+
+    :param count: сколько мёртвых аккаунтов будет удалено.
+    :return: InlineKeyboardMarkup.
+    """
     return kb([
         [btn(f"✅ УДАЛИТЬ {count} АККАУНТОВ", "del_dead_confirm")],
         [btn("❌ ОТМЕНА", "main_menu")],
@@ -263,10 +375,21 @@ def confirm_del_dead(count: int) -> types.InlineKeyboardMarkup:
 
 
 def cleaning_progress() -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура прогресса очистки с кнопкой отмены.
+
+    :return: InlineKeyboardMarkup.
+    """
     return kb([[btn("⏹ ОТМЕНИТЬ ОЧИСТКУ", "clean_cancel")]])
 
 
 def after_check(has_dead: bool) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура после проверки аккаунтов.
+
+    :param has_dead: если True — добавляет кнопку удаления мёртвых.
+    :return: InlineKeyboardMarkup.
+    """
     rows = []
     if has_dead:
         rows.append([btn("🗑️ УДАЛИТЬ МЁРТВЫЕ", "del_dead")])
@@ -274,11 +397,12 @@ def after_check(has_dead: bool) -> types.InlineKeyboardMarkup:
     return kb(rows)
 
 
-# ═══════════════════════════════════════════════════════════════════════════ #
-#                              ПОКУПКА LZT                                     #
-# ═══════════════════════════════════════════════════════════════════════════ #
-
 def buy_menu() -> types.InlineKeyboardMarkup:
+    """
+    Меню покупки номеров через LZT.
+
+    :return: InlineKeyboardMarkup.
+    """
     return kb([
         [btn("🎲 СЛУЧАЙНАЯ СТРАНА", "buy_single_random")],
         [btn("🌍 КОНКРЕТНАЯ СТРАНА", "buy_single_country")],
@@ -289,14 +413,29 @@ def buy_menu() -> types.InlineKeyboardMarkup:
 
 
 def buy_stop_kb() -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура с кнопкой остановки процесса покупки.
+
+    :return: InlineKeyboardMarkup.
+    """
     return kb([[btn("⛔ СТОП", "buy_stop")]])
 
 
 def buy_back() -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура возврата в меню покупки.
+
+    :return: InlineKeyboardMarkup.
+    """
     return kb([[btn("🔙 ОТМЕНА", "buy_menu")]])
 
 
 def buy_after() -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура после успешной покупки.
+
+    :return: InlineKeyboardMarkup.
+    """
     return kb([
         [btn("📦 ХРАНИЛИЩЕ", "storage")],
         [btn("🛒 ЕЩЁ КУПИТЬ", "buy_menu")],
