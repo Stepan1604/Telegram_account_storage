@@ -11,6 +11,7 @@ from ..helpers import (
     edit_or_send,
     safe_edit,
     country_label,
+    country_label_by_code,
     status_label,
     format_remaining,
     build_single_account_csv,
@@ -32,52 +33,90 @@ def register(ctx):
     """
     Регистрирует хендлеры хранилища аккаунтов.
 
-    Включает: список хранилища с пагинацией, избранное, карточку
-    аккаунта с профилем из Telegram, получение кода входа,
-    переименование, смену статуса, удаление и экспорт CSV.
+    Корень хранилища двухуровневый:
+      1. Избранные аккаунты — сверху (несколько штук сразу, с
+         переходом на полный список избранного, если их много).
+      2. "Папки" стран — по одной кнопке на country_code, с числом
+         аккаунтов внутри; открытие папки показывает пагинированный
+         список аккаунтов этой страны (избранные внутри папки тоже
+         идут первыми).
+
+    Также включает: карточку аккаунта с профилем из Telegram,
+    получение кода входа, переименование, смену статуса, удаление и
+    экспорт CSV.
 
     :param ctx: объект Context с общим состоянием.
     """
     bot = ctx.bot
 
-    async def _render_storage(chat_id, page, edit_id=None, call=None,
-                              favorites_only=False):
-        """
-        Рисует страницу хранилища или избранного.
+    # ------------------------------------------------------------------- #
+    #                    КОРЕНЬ ХРАНИЛИЩА: ИЗБРАННЫЕ + ПАПКИ               #
+    # ------------------------------------------------------------------- #
 
-        Показывает список аккаунтов для текущей страницы с эмодзи
-        статуса и звёздочкой избранного, статистику сверху и
-        навигацию внизу.
+    async def _render_storage_root(chat_id, edit_id=None, call=None):
+        """
+        Рисует корень хранилища: избранные сверху, затем папки стран.
 
         :param chat_id: ID чата.
+        :param edit_id: ID сообщения для редактирования.
+        :param call: callback_query (если вызвано из кнопки).
+        """
+        favorites = db.get_favorites()
+        groups = db.get_country_groups()
+        stats = db.get_accounts_stats()
+
+        if not favorites and not groups:
+            text = (
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "📦 ХРАНИЛИЩЕ АККАУНТОВ\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "😔 Хранилище пусто"
+            )
+            markup = kbd.back_main()
+        else:
+            text = (
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "📦 ХРАНИЛИЩЕ АККАУНТОВ\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📊 Всего: {stats['total']}\n"
+                f"🧹 Очищено: {stats['cleaned']}  "
+                f"⚠️ Не очищено: {stats['uncleaned']}  "
+                f"❌ Мёртвых: {stats['dead']}\n"
+                f"⭐ Избранных: {stats.get('favorites', 0)}\n\n"
+                "Выберите аккаунт или папку страны:"
+            )
+            markup = kbd.storage_root_kb(favorites, groups,
+                                         fav_page_size=PAGE_SIZE)
+
+        if call:
+            await edit_or_send(bot, call, text, markup)
+        else:
+            await safe_edit(bot, chat_id, edit_id, text, markup)
+
+    async def _render_storage_country(chat_id, code_token, page,
+                                      edit_id=None, call=None):
+        """
+        Рисует страницу "папки" одной страны.
+
+        :param chat_id: ID чата.
+        :param code_token: токен страны из callback_data (см.
+            kbd._country_token_to_code).
         :param page: номер страницы (0-индексация).
         :param edit_id: ID сообщения для редактирования.
         :param call: callback_query (если вызвано из кнопки).
-        :param favorites_only: если True — показывать только избранные.
         """
-        accounts = db.get_favorites() if favorites_only else db.get_accounts()
+        real_code = kbd._country_token_to_code(code_token)
+        accounts = db.get_accounts_by_country(real_code)
+        label = country_label_by_code(real_code)
 
         if not accounts:
-            if favorites_only:
-                text = (
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "⭐ ИЗБРАННОЕ\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "😔 Пока нет избранных аккаунтов."
-                )
-                markup = kbd.kb([
-                    [kbd.btn("📦 ХРАНИЛИЩЕ", "storage")],
-                    [kbd.btn("🏠 ГЛАВНОЕ МЕНЮ", "main_menu")],
-                ])
-            else:
-                text = (
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "📦 ХРАНИЛИЩЕ АККАУНТОВ\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "😔 Хранилище пусто"
-                )
-                markup = kbd.back_main()
-
+            text = (
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{label}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "😔 В этой папке пусто."
+            )
+            markup = kbd.kb([[kbd.btn("🔙 К СПИСКУ СТРАН", "storage")]])
             if call:
                 await edit_or_send(bot, call, text, markup)
             else:
@@ -89,29 +128,67 @@ def register(ctx):
         page = max(0, min(page, total_pages - 1))
         slice_ = accounts[page * PAGE_SIZE: page * PAGE_SIZE + PAGE_SIZE]
 
-        s = db.get_accounts_stats()
+        text = (
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{label}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📊 Всего: {total}  |  Страница {page + 1} / {total_pages}\n\n"
+            "💡 Избранные — сверху списка.\n\n"
+            "Выберите аккаунт:"
+        )
+        markup = kbd.storage_country_page_kb(slice_, code_token, page,
+                                             total_pages, PAGE_SIZE)
 
-        if favorites_only:
-            header = "⭐ ИЗБРАННОЕ"
-            extra = "\n💡 Избранные сверху в общем списке."
-            markup = kbd.favorites_page(slice_, page, total_pages, PAGE_SIZE)
+        if call:
+            await edit_or_send(bot, call, text, markup)
         else:
-            header = "📦 ХРАНИЛИЩЕ АККАУНТОВ"
-            extra = ""
-            markup = kbd.storage_page(slice_, page, total_pages, PAGE_SIZE)
+            await safe_edit(bot, chat_id, edit_id, text, markup)
+
+    async def _render_favorites_list(chat_id, page, edit_id=None, call=None):
+        """
+        Рисует страницу полного списка избранного.
+
+        Используется кнопкой "⭐ ИЗБРАННОЕ" в главном меню и ссылкой
+        "⭐ ВСЕ ИЗБРАННЫЕ (N)" из корня хранилища, когда избранных
+        больше, чем помещается в превью на корневом экране.
+
+        :param chat_id: ID чата.
+        :param page: номер страницы (0-индексация).
+        :param edit_id: ID сообщения для редактирования.
+        :param call: callback_query (если вызвано из кнопки).
+        """
+        favorites = db.get_favorites()
+
+        if not favorites:
+            text = (
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "⭐ ИЗБРАННОЕ\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "😔 Пока нет избранных аккаунтов."
+            )
+            markup = kbd.kb([
+                [kbd.btn("📦 ХРАНИЛИЩЕ", "storage")],
+                [kbd.btn("🏠 ГЛАВНОЕ МЕНЮ", "main_menu")],
+            ])
+            if call:
+                await edit_or_send(bot, call, text, markup)
+            else:
+                await safe_edit(bot, chat_id, edit_id, text, markup)
+            return
+
+        total = len(favorites)
+        total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+        page = max(0, min(page, total_pages - 1))
+        slice_ = favorites[page * PAGE_SIZE: page * PAGE_SIZE + PAGE_SIZE]
 
         text = (
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{header}\n"
+            "⭐ ИЗБРАННОЕ\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📊 Всего: {total}  |  Страница {page + 1} / {total_pages}\n\n"
-            f"🧹 Очищено: {s['cleaned']}\n"
-            f"⚠️ Не очищено: {s['uncleaned']}\n"
-            f"❌ Мёртвых: {s['dead']}"
-            + (f"\n⭐ Избранных: {s['favorites']}" if s.get("favorites") else "")
-            + f"\n{extra}\n"
             "Выберите аккаунт:"
         )
+        markup = kbd.favorites_page(slice_, page, total_pages, PAGE_SIZE)
 
         if call:
             await edit_or_send(bot, call, text, markup)
@@ -122,41 +199,88 @@ def register(ctx):
     @admin_required
     async def cb_storage(call: types.CallbackQuery):
         """
-        Открывает хранилище с первой страницы.
+        Открывает корень хранилища (избранные + папки стран).
 
         :param call: callback_query от кнопки "📦 ХРАНИЛИЩЕ".
         """
         await bot.answer_callback_query(call.id)
-        await _render_storage(call.message.chat.id, 0, call=call)
+        await _render_storage_root(call.message.chat.id, call=call)
 
     @bot.callback_query_handler(
-        func=lambda c: c.data.startswith("storage_page_")
+        func=lambda c: c.data.startswith("storage_country_")
     )
     @admin_required
-    async def cb_storage_page(call: types.CallbackQuery):
+    async def cb_storage_country(call: types.CallbackQuery):
         """
-        Переключает страницу хранилища.
+        Открывает папку страны (с пагинацией).
 
-        :param call: callback_query с data="storage_page_N".
+        :param call: callback_query с data="storage_country_{токен}_{page}".
         """
         await bot.answer_callback_query(call.id)
         try:
-            page = int(call.data.replace("storage_page_", ""))
-        except ValueError:
-            page = 0
-        await _render_storage(call.message.chat.id, page, call=call)
+            _, _, token, page_str = call.data.split("_")
+            page = int(page_str)
+        except (ValueError, IndexError):
+            page, token = 0, None
+        if token is None:
+            await _render_storage_root(call.message.chat.id, call=call)
+            return
+        await _render_storage_country(call.message.chat.id, token, page,
+                                      call=call)
+
+    @bot.callback_query_handler(
+        func=lambda c: c.data.startswith("storage_back_")
+    )
+    @admin_required
+    async def cb_storage_back(call: types.CallbackQuery):
+        """
+        Универсальная кнопка "Назад" с карточки аккаунта.
+
+        Разбирает токен навигации (origin), с которым была открыта
+        карточка, и возвращает пользователя туда, откуда он пришёл:
+        в корень хранилища, на нужную страницу папки страны или на
+        нужную страницу полного списка избранного. Любой нераспознанный
+        токен (включая старые фиксированные "0" из других модулей
+        бота) трактуется как "вернуться в корень хранилища".
+
+        :param call: callback_query с data="storage_back_{origin}".
+        """
+        await bot.answer_callback_query(call.id)
+        origin = call.data[len("storage_back_"):]
+
+        if origin.startswith("c:"):
+            parts = origin.split(":")
+            if len(parts) == 3:
+                _, token, page_str = parts
+                try:
+                    page = int(page_str)
+                except ValueError:
+                    page = 0
+                await _render_storage_country(call.message.chat.id, token,
+                                              page, call=call)
+                return
+
+        if origin.startswith("f"):
+            try:
+                page = int(origin[1:])
+                await _render_favorites_list(call.message.chat.id, page,
+                                             call=call)
+                return
+            except ValueError:
+                pass
+
+        await _render_storage_root(call.message.chat.id, call=call)
 
     @bot.callback_query_handler(func=lambda c: c.data == "favorites")
     @admin_required
     async def cb_favorites(call: types.CallbackQuery):
         """
-        Открывает список избранных с первой страницы.
+        Открывает полный список избранных с первой страницы.
 
         :param call: callback_query от кнопки "⭐ ИЗБРАННОЕ".
         """
         await bot.answer_callback_query(call.id)
-        await _render_storage(call.message.chat.id, 0, call=call,
-                              favorites_only=True)
+        await _render_favorites_list(call.message.chat.id, 0, call=call)
 
     @bot.callback_query_handler(
         func=lambda c: c.data.startswith("favorites_page_")
@@ -164,7 +288,7 @@ def register(ctx):
     @admin_required
     async def cb_favorites_page(call: types.CallbackQuery):
         """
-        Переключает страницу избранного.
+        Переключает страницу полного списка избранного.
 
         :param call: callback_query с data="favorites_page_N".
         """
@@ -173,11 +297,14 @@ def register(ctx):
             page = int(call.data.replace("favorites_page_", ""))
         except ValueError:
             page = 0
-        await _render_storage(call.message.chat.id, page, call=call,
-                              favorites_only=True)
+        await _render_favorites_list(call.message.chat.id, page, call=call)
+
+    # ------------------------------------------------------------------- #
+    #                            КАРТОЧКА АККАУНТА                         #
+    # ------------------------------------------------------------------- #
 
     async def _render_account(call: types.CallbackQuery, acc_id: int,
-                              page: int):
+                              origin):
         """
         Показывает карточку аккаунта с профилем из Telegram.
 
@@ -187,7 +314,9 @@ def register(ctx):
 
         :param call: callback_query.
         :param acc_id: ID аккаунта в БД.
-        :param page: номер страницы хранилища для возврата.
+        :param origin: токен навигации для возврата (см.
+            kbd.account_card) — передаётся насквозь во все действия
+            над этим аккаунтом и в кнопку "Назад".
         """
         acc = db.get_account(acc_id)
         if not acc:
@@ -250,7 +379,7 @@ def register(ctx):
             f"{source_line}\n\n"
             "⏳ Загружаю профиль Telegram..."
         )
-        await edit_or_send(bot, call, placeholder, kbd.account_card(acc, page))
+        await edit_or_send(bot, call, placeholder, kbd.account_card(acc, origin))
 
         info = await get_account_info(acc.session, acc.phone)
 
@@ -290,7 +419,7 @@ def register(ctx):
             f"{cleaned_line}"
             f"{auto_line}"
         )
-        await edit_or_send(bot, call, final_text, kbd.account_card(acc, page))
+        await edit_or_send(bot, call, final_text, kbd.account_card(acc, origin))
 
     @bot.callback_query_handler(func=lambda c: c.data.startswith("acc_view_"))
     @admin_required
@@ -298,16 +427,16 @@ def register(ctx):
         """
         Открывает карточку аккаунта по кнопке.
 
-        :param call: callback_query с data="acc_view_{id}_{page}".
+        :param call: callback_query с data="acc_view_{id}_{origin}".
         """
         await bot.answer_callback_query(call.id)
         try:
-            _, _, acc_id, page = call.data.split("_")
-            acc_id, page = int(acc_id), int(page)
+            _, _, acc_id, origin = call.data.split("_")
+            acc_id = int(acc_id)
         except (ValueError, IndexError) as e:
             logger.error(f"[cb_acc_view] parse: {e}")
             return
-        await _render_account(call, acc_id, page)
+        await _render_account(call, acc_id, origin)
 
     @bot.callback_query_handler(func=lambda c: c.data.startswith("acc_code_"))
     @admin_required
@@ -322,8 +451,8 @@ def register(ctx):
         """
         await bot.answer_callback_query(call.id, "⏳ Читаю...")
         try:
-            _, _, acc_id, page = call.data.split("_")
-            acc_id, page = int(acc_id), int(page)
+            _, _, acc_id, origin = call.data.split("_")
+            acc_id = int(acc_id)
         except (ValueError, IndexError):
             return
 
@@ -363,8 +492,8 @@ def register(ctx):
             )
 
         markup = kbd.kb([
-            [kbd.btn("🔄 ПОВТОРИТЬ", f"acc_code_{acc_id}_{page}")],
-            [kbd.btn("🔙 К АККАУНТУ", f"acc_view_{acc_id}_{page}")],
+            [kbd.btn("🔄 ПОВТОРИТЬ", f"acc_code_{acc_id}_{origin}")],
+            [kbd.btn("🔙 К АККАУНТУ", f"acc_view_{acc_id}_{origin}")],
         ])
         await edit_or_send(bot, call, text, markup, parse_mode="Markdown")
 
@@ -377,8 +506,8 @@ def register(ctx):
         :param call: callback_query от кнопки "☆ В ИЗБРАННОЕ" / "★ УБРАТЬ".
         """
         try:
-            _, _, acc_id, page = call.data.split("_")
-            acc_id, page = int(acc_id), int(page)
+            _, _, acc_id, origin = call.data.split("_")
+            acc_id = int(acc_id)
         except (ValueError, IndexError):
             return
 
@@ -398,7 +527,7 @@ def register(ctx):
             "⭐ Добавлен в избранное" if now_fav else "☆ Убран из избранного",
             show_alert=False,
         )
-        await _render_account(call, acc_id, page)
+        await _render_account(call, acc_id, origin)
 
     @bot.callback_query_handler(func=lambda c: c.data.startswith("acc_rename_"))
     @admin_required
@@ -413,8 +542,8 @@ def register(ctx):
         """
         await bot.answer_callback_query(call.id)
         try:
-            _, _, acc_id, page = call.data.split("_")
-            acc_id, page = int(acc_id), int(page)
+            _, _, acc_id, origin = call.data.split("_")
+            acc_id = int(acc_id)
         except (ValueError, IndexError):
             return
 
@@ -426,7 +555,7 @@ def register(ctx):
         ctx.user_state[call.from_user.id] = {
             "state": "rename_account",
             "acc_id": acc_id,
-            "page": page,
+            "page": origin,
         }
 
         current = acc.name or acc.phone
@@ -453,13 +582,14 @@ def register(ctx):
         Если новый статус "cleaned" — отменяет запланированную
         автоочистку для этого аккаунта.
 
-        :param call: callback_query с data="acc_status_set_{id}_{status}_{page}".
+        :param call: callback_query с
+            data="acc_status_set_{id}_{status}_{origin}".
         """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
         try:
-            _, _, _, acc_id, new_status, page = call.data.split("_")
-            acc_id, page = int(acc_id), int(page)
+            _, _, _, acc_id, new_status, origin = call.data.split("_")
+            acc_id = int(acc_id)
         except (ValueError, IndexError):
             return
 
@@ -480,7 +610,7 @@ def register(ctx):
             call.id, f"✅ Статус: {status_label(new_status)}",
             show_alert=False,
         )
-        await _render_account(call, acc_id, page)
+        await _render_account(call, acc_id, origin)
 
     @bot.callback_query_handler(
         func=lambda c: c.data.startswith("acc_status_")
@@ -494,8 +624,8 @@ def register(ctx):
         """
         await bot.answer_callback_query(call.id)
         try:
-            _, _, acc_id, page = call.data.split("_")
-            acc_id, page = int(acc_id), int(page)
+            _, _, acc_id, origin = call.data.split("_")
+            acc_id = int(acc_id)
         except (ValueError, IndexError):
             return
 
@@ -513,7 +643,7 @@ def register(ctx):
             f"📌 Текущий: {status_label(acc.status)}\n\n"
             "💡 Выберите новый статус:"
         )
-        await edit_or_send(bot, call, text, kbd.status_menu(acc_id, page))
+        await edit_or_send(bot, call, text, kbd.status_menu(acc_id, origin))
 
     @bot.callback_query_handler(
         func=lambda c: c.data.startswith("acc_del_yes_")
@@ -532,7 +662,7 @@ def register(ctx):
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
         try:
-            _, _, _, acc_id, page = call.data.split("_")
+            _, _, _, acc_id, origin = call.data.split("_")
             acc_id = int(acc_id)
         except (ValueError, IndexError):
             return
@@ -566,8 +696,8 @@ def register(ctx):
         """
         await bot.answer_callback_query(call.id)
         try:
-            _, _, acc_id, page = call.data.split("_")
-            acc_id, page = int(acc_id), int(page)
+            _, _, acc_id, origin = call.data.split("_")
+            acc_id = int(acc_id)
         except (ValueError, IndexError):
             return
 
@@ -585,7 +715,7 @@ def register(ctx):
             f"🌍 {country_label(acc.phone)}\n\n"
             "❗ Это действие нельзя отменить."
         )
-        await edit_or_send(bot, call, text, kbd.confirm_delete(acc_id, page))
+        await edit_or_send(bot, call, text, kbd.confirm_delete(acc_id, origin))
 
     @bot.callback_query_handler(
         func=lambda c: c.data.startswith("acc_export_")
@@ -602,7 +732,7 @@ def register(ctx):
         """
         await bot.answer_callback_query(call.id, "📤 Готовлю файл...")
         try:
-            _, _, acc_id, page = call.data.split("_")
+            _, _, acc_id, origin = call.data.split("_")
             acc_id = int(acc_id)
         except (ValueError, IndexError) as e:
             logger.error(f"[acc_export] parse: {e}")

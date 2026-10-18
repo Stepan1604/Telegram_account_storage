@@ -1,5 +1,7 @@
 from telebot import types
 
+from .helpers import country_label_by_code
+
 
 def btn(text: str, cb: str) -> types.InlineKeyboardButton:
     """
@@ -58,21 +60,98 @@ def cancel() -> types.InlineKeyboardMarkup:
     return kb([[btn("🔙 ОТМЕНА", "main_menu")]])
 
 
-def storage_page(accounts, page: int, total_pages: int,
-                 page_size: int = 5) -> types.InlineKeyboardMarkup:
+# --------------------------------------------------------------------- #
+#             ХРАНИЛИЩЕ: КОРЕНЬ (ИЗБРАННЫЕ + ПАПКИ СТРАН)               #
+# --------------------------------------------------------------------- #
+
+NO_COUNTRY_TOKEN = "ZZ"  # служебный код для группы "без страны" в callback_data
+
+
+def _country_code_to_token(code: str) -> str:
     """
-    Клавиатура страницы хранилища.
+    Преобразует country_code ("" для "без страны") в токен для
+    callback_data, где пустая строка недопустима.
 
-    Формирует список аккаунтов с эмодзи статуса и звёздочкой избранного,
-    навигацию ⬅️/➡️ и кнопку возврата в меню.
+    :param code: код страны ("" — без страны).
+    :return: сам код, либо NO_COUNTRY_TOKEN, если код пуст.
+    """
+    return code if code else NO_COUNTRY_TOKEN
 
-    :param accounts: список объектов Account для текущей страницы.
-    :param page: номер текущей страницы (0-индексация).
-    :param total_pages: всего страниц.
-    :param page_size: количество аккаунтов на странице.
+
+def _country_token_to_code(token: str) -> str:
+    """
+    Обратное преобразование: токен callback_data → реальный
+    country_code для запроса в БД.
+
+    :param token: токен из callback_data.
+    :return: код страны ("" для группы "без страны").
+    """
+    return "" if token == NO_COUNTRY_TOKEN else token
+
+
+def storage_root_kb(favorites, groups,
+                    fav_page_size: int = 5) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура корня хранилища: сначала избранные (до fav_page_size
+    штук, с ссылкой на полный список, если их больше), затем папки
+    стран со счётчиком аккаунтов в каждой.
+
+    :param favorites: список избранных объектов Account (favorite=1).
+    :param groups: список словарей {"code", "count"} из
+        db.get_country_groups().
+    :param fav_page_size: сколько избранных показать прямо здесь,
+        не отправляя на отдельную страницу.
     :return: InlineKeyboardMarkup.
     """
     rows = []
+
+    shown_favs = favorites[:fav_page_size]
+    for acc in shown_favs:
+        emoji = {
+            "cleaned": "🧹",
+            "uncleaned": "⚠️",
+            "dead": "❌",
+        }.get(acc.status, "•")
+        label = acc.name or acc.phone
+        # origin "r" — аккаунт открыт из корня хранилища, кнопка
+        # "Назад" на его карточке должна вернуть сюда же.
+        rows.append([btn(f"⭐ {emoji} {label}", f"acc_view_{acc.id}_r")])
+
+    if len(favorites) > fav_page_size:
+        rows.append([
+            btn(f"⭐ ВСЕ ИЗБРАННЫЕ ({len(favorites)})", "favorites")
+        ])
+
+    for g in groups:
+        label = country_label_by_code(g["code"])
+        token = _country_code_to_token(g["code"])
+        rows.append([
+            btn(f"{label} ({g['count']})", f"storage_country_{token}_0")
+        ])
+
+    rows.append([btn("🏠 ГЛАВНОЕ МЕНЮ", "main_menu")])
+    return kb(rows)
+
+
+def storage_country_page_kb(accounts, code_token: str, page: int,
+                            total_pages: int,
+                            page_size: int = 5) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура страницы внутри "папки" одной страны.
+
+    Избранные внутри папки уже идут первыми благодаря сортировке в
+    db.get_accounts_by_country (favorite desc, id desc).
+
+    :param accounts: аккаунты текущей страницы этой страны.
+    :param code_token: токен страны для callback_data (см.
+        _country_code_to_token).
+    :param page: номер текущей страницы (0-индексация).
+    :param total_pages: всего страниц в этой папке.
+    :param page_size: аккаунтов на странице.
+    :return: InlineKeyboardMarkup.
+    """
+    rows = []
+    origin = f"c:{code_token}:{page}"
     for acc in accounts:
         emoji = {
             "cleaned": "🧹",
@@ -82,26 +161,26 @@ def storage_page(accounts, page: int, total_pages: int,
         star = "⭐ " if (acc.favorite or 0) == 1 else ""
         label = acc.name or acc.phone
         rows.append([
-            btn(f"{star}{emoji} {label}", f"acc_view_{acc.id}_{page}")
+            btn(f"{star}{emoji} {label}", f"acc_view_{acc.id}_{origin}")
         ])
 
     nav = []
     if page > 0:
-        nav.append(btn("⬅️", f"storage_page_{page - 1}"))
+        nav.append(btn("⬅️", f"storage_country_{code_token}_{page - 1}"))
     nav.append(btn(f"{page + 1}/{total_pages}", "noop"))
     if page < total_pages - 1:
-        nav.append(btn("➡️", f"storage_page_{page + 1}"))
+        nav.append(btn("➡️", f"storage_country_{code_token}_{page + 1}"))
     rows.append(nav)
-    rows.append([btn("🔙 НАЗАД", "main_menu")])
+    rows.append([btn("🔙 К СПИСКУ СТРАН", "storage")])
     return kb(rows)
 
 
 def favorites_page(accounts, page: int, total_pages: int,
                    page_size: int = 5) -> types.InlineKeyboardMarkup:
     """
-    Клавиатура страницы избранного.
-
-    Аналогична storage_page, но все кнопки со звёздочкой.
+    Клавиатура страницы полного списка избранного (кнопка
+    "⭐ ИЗБРАННОЕ" в главном меню / "⭐ ВСЕ ИЗБРАННЫЕ" из корня
+    хранилища).
 
     :param accounts: список объектов Account для текущей страницы.
     :param page: номер текущей страницы.
@@ -118,7 +197,7 @@ def favorites_page(accounts, page: int, total_pages: int,
         }.get(acc.status, "•")
         label = acc.name or acc.phone
         rows.append([
-            btn(f"⭐ {emoji} {label}", f"acc_view_{acc.id}_{page}")
+            btn(f"⭐ {emoji} {label}", f"acc_view_{acc.id}_f{page}")
         ])
 
     nav = []
@@ -132,7 +211,7 @@ def favorites_page(accounts, page: int, total_pages: int,
     return kb(rows)
 
 
-def account_card(acc, page: int) -> types.InlineKeyboardMarkup:
+def account_card(acc, origin) -> types.InlineKeyboardMarkup:
     """
     Клавиатура карточки аккаунта.
 
@@ -140,7 +219,13 @@ def account_card(acc, page: int) -> types.InlineKeyboardMarkup:
     отчёт, экспорт, избранное, переименование, смена статуса, удаление.
 
     :param acc: объект Account.
-    :param page: номер страницы хранилища, с которой пришли.
+    :param origin: токен навигации — откуда открыта карточка
+        (используется и как "page" в остальных callback_data этого
+        аккаунта, и чтобы кнопка "Назад" вела в нужное место: "r" —
+        корень хранилища, "f{N}" — страница N полного списка
+        избранного, "c:{код}:{N}" — страница N папки страны {код},
+        любое другое значение (например, просто "0" из других
+        модулей бота) трактуется как "вернуться в корень хранилища").
     :return: InlineKeyboardMarkup.
     """
     current = acc.name or acc.phone
@@ -150,50 +235,50 @@ def account_card(acc, page: int) -> types.InlineKeyboardMarkup:
         fav_label = "☆ В ИЗБРАННОЕ"
 
     return kb([
-        [btn("🔑 ПОЛУЧИТЬ КОД", f"acc_code_{acc.id}_{page}")],
-        [btn("🔄 ОБНОВИТЬ ИНФУ", f"acc_view_{acc.id}_{page}")],
-        [btn("🧹 ОЧИСТИТЬ СЕССИИ", f"acc_clean_{acc.id}_{page}")],
-        [btn("🗑️ ОЧИСТИТЬ ЧАТЫ", f"acc_clear_chats_{acc.id}_{page}")],
-        [btn("📊 ОТЧЁТ ПО АККАУНТУ", f"acc_report_{acc.id}_{page}")],
-        [btn("📤 ЭКСПОРТ ЭТОГО АККАУНТА", f"acc_export_{acc.id}_{page}")],
-        [btn(fav_label, f"acc_fav_{acc.id}_{page}")],
-        [btn(f"🏷 ДАТЬ НАЗВАНИЕ ({current[:20]})", f"acc_rename_{acc.id}_{page}")],
-        [btn("✏️ ИЗМЕНИТЬ СТАТУС", f"acc_status_{acc.id}_{page}")],
-        [btn("🗑️ УДАЛИТЬ", f"acc_del_{acc.id}_{page}")],
-        [btn("🔙 НАЗАД", f"storage_page_{page}")],
+        [btn("🔑 ПОЛУЧИТЬ КОД", f"acc_code_{acc.id}_{origin}")],
+        [btn("🔄 ОБНОВИТЬ ИНФУ", f"acc_view_{acc.id}_{origin}")],
+        [btn("🧹 ОЧИСТИТЬ СЕССИИ", f"acc_clean_{acc.id}_{origin}")],
+        [btn("🗑️ ОЧИСТИТЬ ЧАТЫ", f"acc_clear_chats_{acc.id}_{origin}")],
+        [btn("📊 ОТЧЁТ ПО АККАУНТУ", f"acc_report_{acc.id}_{origin}")],
+        [btn("📤 ЭКСПОРТ ЭТОГО АККАУНТА", f"acc_export_{acc.id}_{origin}")],
+        [btn(fav_label, f"acc_fav_{acc.id}_{origin}")],
+        [btn(f"🏷 ДАТЬ НАЗВАНИЕ ({current[:20]})", f"acc_rename_{acc.id}_{origin}")],
+        [btn("✏️ ИЗМЕНИТЬ СТАТУС", f"acc_status_{acc.id}_{origin}")],
+        [btn("🗑️ УДАЛИТЬ", f"acc_del_{acc.id}_{origin}")],
+        [btn("🔙 НАЗАД", f"storage_back_{origin}")],
     ])
 
 
-def status_menu(acc_id: int, page: int) -> types.InlineKeyboardMarkup:
+def status_menu(acc_id: int, origin) -> types.InlineKeyboardMarkup:
     """
     Клавиатура выбора нового статуса аккаунта.
 
     :param acc_id: ID аккаунта.
-    :param page: номер страницы хранилища.
+    :param origin: токен навигации (см. account_card).
     :return: InlineKeyboardMarkup.
     """
     return kb([
         [btn("🧹 Очищен от чужих сессий",
-             f"acc_status_set_{acc_id}_cleaned_{page}")],
+             f"acc_status_set_{acc_id}_cleaned_{origin}")],
         [btn("⚠️ Ожидает очистки",
-             f"acc_status_set_{acc_id}_uncleaned_{page}")],
+             f"acc_status_set_{acc_id}_uncleaned_{origin}")],
         [btn("❌ Мёртвый аккаунт",
-             f"acc_status_set_{acc_id}_dead_{page}")],
-        [btn("🔙 НАЗАД", f"acc_view_{acc_id}_{page}")],
+             f"acc_status_set_{acc_id}_dead_{origin}")],
+        [btn("🔙 НАЗАД", f"acc_view_{acc_id}_{origin}")],
     ])
 
 
-def confirm_delete(acc_id: int, page: int) -> types.InlineKeyboardMarkup:
+def confirm_delete(acc_id: int, origin) -> types.InlineKeyboardMarkup:
     """
     Клавиатура подтверждения удаления аккаунта.
 
     :param acc_id: ID аккаунта.
-    :param page: номер страницы хранилища.
+    :param origin: токен навигации (см. account_card).
     :return: InlineKeyboardMarkup.
     """
     return kb([
-        [btn("✅ ДА, УДАЛИТЬ", f"acc_del_yes_{acc_id}_{page}")],
-        [btn("❌ ОТМЕНА", f"acc_view_{acc_id}_{page}")],
+        [btn("✅ ДА, УДАЛИТЬ", f"acc_del_yes_{acc_id}_{origin}")],
+        [btn("❌ ОТМЕНА", f"acc_view_{acc_id}_{origin}")],
     ])
 
 
@@ -241,35 +326,37 @@ def reports_accounts_page(accounts, page: int, total_pages: int,
     return kb(rows)
 
 
-def account_report_kb(acc, page: int = 0) -> types.InlineKeyboardMarkup:
+def account_report_kb(acc, origin=0) -> types.InlineKeyboardMarkup:
     """
     Клавиатура под отчётом по одному аккаунту.
 
     :param acc: объект Account.
-    :param page: номер страницы для возврата.
+    :param origin: токен навигации для возврата к карточке (см.
+        account_card); из модуля отчётов обычно просто целочисленная
+        страница их собственного списка.
     :return: InlineKeyboardMarkup.
     """
     return kb([
-        [btn("📜 История действий", f"acc_history_{acc.id}_{page}")],
-        [btn("📤 Экспорт этого аккаунта", f"acc_export_{acc.id}_{page}")],
-        [btn("🔙 К АККАУНТУ", f"acc_view_{acc.id}_{page}")],
+        [btn("📜 История действий", f"acc_history_{acc.id}_{origin}")],
+        [btn("📤 Экспорт этого аккаунта", f"acc_export_{acc.id}_{origin}")],
+        [btn("🔙 К АККАУНТУ", f"acc_view_{acc.id}_{origin}")],
         [btn("📦 ХРАНИЛИЩЕ", "storage")],
         [btn("🏠 ГЛАВНОЕ МЕНЮ", "main_menu")],
     ])
 
 
-def account_history_kb(acc_id: int, page: int) -> types.InlineKeyboardMarkup:
+def account_history_kb(acc_id: int, origin) -> types.InlineKeyboardMarkup:
     """
     Клавиатура под историей действий аккаунта.
 
     :param acc_id: ID аккаунта.
-    :param page: номер страницы для возврата.
+    :param origin: токен навигации для возврата к отчёту.
     :return: InlineKeyboardMarkup.
     """
     return kb([
-        [btn("🔄 ОБНОВИТЬ", f"acc_history_{acc_id}_{page}")],
-        [btn("📤 ЭКСПОРТ ИСТОРИИ", f"acc_history_export_{acc_id}_{page}")],
-        [btn("🔙 К ОТЧЁТУ", f"acc_report_{acc_id}_{page}")],
+        [btn("🔄 ОБНОВИТЬ", f"acc_history_{acc_id}_{origin}")],
+        [btn("📤 ЭКСПОРТ ИСТОРИИ", f"acc_history_export_{acc_id}_{origin}")],
+        [btn("🔙 К ОТЧЁТУ", f"acc_report_{acc_id}_{origin}")],
     ])
 
 

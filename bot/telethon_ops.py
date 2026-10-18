@@ -156,6 +156,12 @@ async def is_alive(session_string: str, phone: str):
     except Exception as e:
         logger.error(f"[is_alive] {phone}: {type(e).__name__}: {e}")
         logger.debug(traceback.format_exc())
+        # Непредвиденная ошибка (например, TypeNotFoundError из-за устаревшей
+        # версии Telethon / изменений в TL-схеме Telegram) может означать,
+        # что клиент в кэше остался в "грязном" состоянии. Закрываем и
+        # убираем его из кэша, чтобы следующий вызов пересоздал клиента
+        # с чистого листа, а не переиспользовал битое соединение.
+        await close_client(phone)
         return False, f"Ошибка: {str(e)[:120]}"
 
 
@@ -275,9 +281,16 @@ async def get_account_info(session_string: str, phone: str) -> dict:
         result["error"] = "Таймаут"
     except Exception as e:
         logger.error(f"[acc_info] {phone}: {type(e).__name__}: {e}")
+        logger.debug(traceback.format_exc())
         result["error"] = f"Ошибка: {str(e)[:120]}"
     finally:
-        close_client(phone)
+        # БЫЛО: close_client(phone)  — корутина создавалась, но никогда не
+        # авaited'илась (RuntimeWarning: coroutine 'close_client' was never
+        # awaited). Из-за этого клиент не закрывался и не убирался из
+        # кэша _clients, оставаясь висеть с возможным "грязным" состоянием
+        # соединения (что также способствует ошибкам вроде TypeNotFoundError
+        # при последующих запросах к этому же номеру).
+        await close_client(phone)
     return result
 
 

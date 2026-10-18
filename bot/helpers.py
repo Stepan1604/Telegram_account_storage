@@ -66,6 +66,25 @@ def country_label(phone: str) -> str:
     return "🌍 Неизвестно"
 
 
+def country_label_by_code(code: str) -> str:
+    """
+    Возвращает название страны с флагом по её коду (RU, US, ...), а не
+    по номеру телефона. Используется для подписи "папок" стран в
+    хранилище, где известен сохранённый country_code аккаунта.
+
+    :param code: код страны из config.COUNTRIES, или "" для группы
+        аккаунтов без определённой страны.
+    :return: строка вида "🇷🇺 Россия" или "🌍 Без страны" (если код
+        пуст), либо "🌍 {code}" если код не найден в справочнике.
+    """
+    if not code:
+        return "🌍 Без страны"
+    for c in COUNTRIES:
+        if c.get("code") == code:
+            return f"{c['flag']} {c['name']}"
+    return f"🌍 {code}"
+
+
 def status_label(s: str) -> str:
     """
     Возвращает человекочитаемую метку статуса аккаунта.

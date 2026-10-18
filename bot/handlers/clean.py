@@ -325,8 +325,10 @@ def register(ctx):
             await edit_or_send(bot, call, "📦 Хранилище пусто.",
                                kbd.back_main())
             return
-        # Если есть завершённая запись — сбрасываем её, иначе если
-        # задача ещё не завершилась — отменяем её.
+        # Явно сбрасываем предыдущую задачу перед запуском новой:
+        # set_running_task ниже тоже сам отменяет старую задачу, но
+        # делаем это заранее, чтобы прогресс-сообщение гарантированно
+        # перезапускалось с чистого состояния.
         old = ctx.running_tasks.get(uid)
         if old is not None and not old.done():
             old.cancel()
@@ -385,7 +387,15 @@ def register(ctx):
             if task and not task.done():
                 task.cancel()
 
-            s, msg = await reset_other_sessions(acc.session, acc.phone)
+            # Блокируем аккаунт на время обработки, чтобы исключить
+            # гонку с одиночной кнопкой "🧹 ОЧИСТИТЬ СЕССИИ" на карточке
+            # этого же аккаунта, если админ нажмёт её параллельно.
+            locked = ctx.try_lock_account(acc.id)
+            try:
+                s, msg = await reset_other_sessions(acc.session, acc.phone)
+            finally:
+                if locked:
+                    ctx.unlock_account(acc.id)
 
             if s:
                 ok += 1
@@ -511,78 +521,97 @@ def register(ctx):
         Вызывает reset_other_sessions. При FROZEN помечает dead.
         Отменяет автоочистку для этого аккаунта.
 
-        :param call: callback_query от кнопки "🧹 ОЧИСТИТЬ СЕССИИ".
+        Защищена от повторного запуска: если очистка этого же
+        аккаунта уже выполняется (например, при двойном нажатии
+        кнопки), второй запрос просто показывает предупреждение и
+        не стартует ещё один reset_other_sessions параллельно.
+
+        :param call: callback_query с data="acc_clean_{id}_{origin}",
+            где origin — токен навигации для кнопки "Назад" (не
+            обязательно число — см. kbd.account_card).
         """
+        try:
+            _, _, acc_id, origin = call.data.split("_")
+            acc_id = int(acc_id)
+        except Exception:
+            await bot.answer_callback_query(call.id)
+            return
+
+        if not ctx.try_lock_account(acc_id):
+            await bot.answer_callback_query(
+                call.id, "⏳ Очистка этого аккаунта уже выполняется",
+                show_alert=False,
+            )
+            return
+
         await bot.answer_callback_query(call.id, "⏳ Очищаю...")
         uid = call.from_user.id
+
         try:
-            _, _, acc_id, page = call.data.split("_")
-            acc_id, page = int(acc_id), int(page)
-        except Exception:
-            return
+            acc = db.get_account(acc_id)
+            if not acc:
+                await edit_or_send(bot, call, "❌ Аккаунт не найден")
+                return
 
-        acc = db.get_account(acc_id)
-        if not acc:
-            await edit_or_send(bot, call, "❌ Аккаунт не найден")
-            return
-
-        await edit_or_send(
-            bot, call,
-            "⏳ ОЧИЩАЮ СЕССИИ И ЧАТЫ...\n\n"
-            f"🏷 {acc.name or acc.phone}\n"
-            f"📞 {acc.phone}\n\n"
-            "1️⃣ Завершаю чужие сессии\n"
-            "2️⃣ Выхожу из групп и каналов\n"
-            "3️⃣ Удаляю всю переписку\n\n"
-            "⏳ Это может занять до минуты...",
-        )
-
-        task = ctx.pop_auto_clean_task(acc_id)
-        if task and not task.done():
-            task.cancel()
-
-        ok, msg = await reset_other_sessions(acc.session, acc.phone)
-
-        if ok:
-            db.mark_cleaned(acc.id)
-            db.stat_cleaned(1)
-            db.log_action(uid, "clean", details=acc.phone, account_id=acc.id)
-            text = (
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                "✅ ОЧИСТКА ЗАВЕРШЕНА\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            await edit_or_send(
+                bot, call,
+                "⏳ ОЧИЩАЮ СЕССИИ И ЧАТЫ...\n\n"
+                f"🏷 {acc.name or acc.phone}\n"
                 f"📞 {acc.phone}\n\n"
-                "🔒 Все чужие сессии завершены.\n"
-                "📤 Выход из групп и каналов.\n"
-                "🗑️ Переписка удалена.\n\n"
-                f"ℹ️ {msg}"
-            )
-        elif msg == "FROZEN":
-            db.update_account_status(acc.id, "dead")
-            db.log_action(uid, "frozen", details="ручная очистка",
-                          account_id=acc.id)
-            text = (
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                "🧊 АККАУНТ ЗАМОРОЖЕН TELEGRAM\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📞 {acc.phone}\n\n"
-                "ResetAuthorizations недоступен.\n\n"
-                "📌 Статус изменён на ❌ Мёртвый."
-            )
-        else:
-            text = (
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                "❌ НЕ УДАЛОСЬ ОЧИСТИТЬ\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📞 {acc.phone}\n\n"
-                f"Ошибки: {msg}"
+                "1️⃣ Завершаю чужие сессии\n"
+                "2️⃣ Выхожу из групп и каналов\n"
+                "3️⃣ Удаляю всю переписку\n\n"
+                "⏳ Это может занять до минуты...",
             )
 
-        markup = kbd.kb([
-            [kbd.btn("🔙 К АККАУНТУ", f"acc_view_{acc_id}_{page}")],
-            [kbd.btn("🏠 МЕНЮ", "main_menu")],
-        ])
-        await edit_or_send(bot, call, text, markup)
+            task = ctx.pop_auto_clean_task(acc_id)
+            if task and not task.done():
+                task.cancel()
+
+            ok, msg = await reset_other_sessions(acc.session, acc.phone)
+
+            if ok:
+                db.mark_cleaned(acc.id)
+                db.stat_cleaned(1)
+                db.log_action(uid, "clean", details=acc.phone, account_id=acc.id)
+                text = (
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "✅ ОЧИСТКА ЗАВЕРШЕНА\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📞 {acc.phone}\n\n"
+                    "🔒 Все чужие сессии завершены.\n"
+                    "📤 Выход из групп и каналов.\n"
+                    "🗑️ Переписка удалена.\n\n"
+                    f"ℹ️ {msg}"
+                )
+            elif msg == "FROZEN":
+                db.update_account_status(acc.id, "dead")
+                db.log_action(uid, "frozen", details="ручная очистка",
+                              account_id=acc.id)
+                text = (
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "🧊 АККАУНТ ЗАМОРОЖЕН TELEGRAM\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📞 {acc.phone}\n\n"
+                    "ResetAuthorizations недоступен.\n\n"
+                    "📌 Статус изменён на ❌ Мёртвый."
+                )
+            else:
+                text = (
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "❌ НЕ УДАЛОСЬ ОЧИСТИТЬ\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"📞 {acc.phone}\n\n"
+                    f"Ошибки: {msg}"
+                )
+
+            markup = kbd.kb([
+                [kbd.btn("🔙 К АККАУНТУ", f"acc_view_{acc_id}_{origin}")],
+                [kbd.btn("🏠 МЕНЮ", "main_menu")],
+            ])
+            await edit_or_send(bot, call, text, markup)
+        finally:
+            ctx.unlock_account(acc_id)
 
     @bot.callback_query_handler(
         func=lambda c: c.data.startswith("acc_clear_chats_")
@@ -592,86 +621,104 @@ def register(ctx):
         """
         Очищает только чаты аккаунта (без сброса сессий).
 
-        :param call: callback_query от кнопки "🗑️ ОЧИСТИТЬ ЧАТЫ".
+        Защищена той же блокировкой busy_accounts, что и cb_acc_clean —
+        очистка сессий и очистка только чатов используют одну и ту же
+        Telethon-сессию аккаунта, поэтому не должны выполняться
+        параллельно.
+
+        :param call: callback_query с
+            data="acc_clear_chats_{id}_{origin}".
         """
-        await bot.answer_callback_query(call.id, "⏳ Чищу чаты...")
-        uid = call.from_user.id
         try:
-            _, _, _, acc_id, page = call.data.split("_")
-            acc_id, page = int(acc_id), int(page)
+            _, _, _, acc_id, origin = call.data.split("_")
+            acc_id = int(acc_id)
         except Exception as e:
             logger.error(f"[cb_acc_clear_chats] parse: {e}")
+            await bot.answer_callback_query(call.id)
             return
 
-        acc = db.get_account(acc_id)
-        if not acc:
-            await edit_or_send(bot, call, "❌ Аккаунт не найден")
+        if not ctx.try_lock_account(acc_id):
+            await bot.answer_callback_query(
+                call.id, "⏳ Операция с этим аккаунтом уже выполняется",
+                show_alert=False,
+            )
             return
 
-        await edit_or_send(
-            bot, call,
-            "⏳ УДАЛЯЮ ЧАТЫ...\n\n"
-            f"🏷 {acc.name or acc.phone}\n"
-            f"📞 {acc.phone}\n\n"
-            "📤 Выхожу из групп и каналов\n"
-            "🗑️ Удаляю всю переписку\n"
-            "⏳ Это может занять до минуты...",
-        )
+        await bot.answer_callback_query(call.id, "⏳ Чищу чаты...")
+        uid = call.from_user.id
 
-        ok, msg, deleted, failed, total = await clear_dialogs_only(
-            acc.session, acc.phone
-        )
+        try:
+            acc = db.get_account(acc_id)
+            if not acc:
+                await edit_or_send(bot, call, "❌ Аккаунт не найден")
+                return
 
-        if ok:
-            db.log_action(uid, "clear_chats",
-                          details=f"{acc.phone} del={deleted} fail={failed}",
-                          account_id=acc.id)
-            if total == 0:
+            await edit_or_send(
+                bot, call,
+                "⏳ УДАЛЯЮ ЧАТЫ...\n\n"
+                f"🏷 {acc.name or acc.phone}\n"
+                f"📞 {acc.phone}\n\n"
+                "📤 Выхожу из групп и каналов\n"
+                "🗑️ Удаляю всю переписку\n"
+                "⏳ Это может занять до минуты...",
+            )
+
+            ok, msg, deleted, failed, total = await clear_dialogs_only(
+                acc.session, acc.phone
+            )
+
+            if ok:
+                db.log_action(uid, "clear_chats",
+                              details=f"{acc.phone} del={deleted} fail={failed}",
+                              account_id=acc.id)
+                if total == 0:
+                    text = (
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        "✅ ЧАТОВ НЕТ\n"
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"📞 {acc.phone}\n\n"
+                        "🗑️ У аккаунта не было диалогов."
+                    )
+                else:
+                    text = (
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        "✅ ЧАТЫ ОЧИЩЕНЫ\n"
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"📞 {acc.phone}\n\n"
+                        f"📤 Обработано:   {deleted}\n"
+                        f"⚠️ Ошибок:       {failed}\n"
+                        f"📊 Всего было:   {total}\n\n"
+                        "ℹ️ Сессии аккаунта НЕ тронуты."
+                    )
+            elif msg == "FROZEN":
+                db.update_account_status(acc.id, "dead")
+                db.log_action(uid, "frozen", details="clear_chats",
+                              account_id=acc.id)
                 text = (
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "✅ ЧАТОВ НЕТ\n"
+                    "🧊 АККАУНТ ЗАМОРОЖЕН TELEGRAM\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                     f"📞 {acc.phone}\n\n"
-                    "🗑️ У аккаунта не было диалогов."
+                    "Очистка чатов недоступна.\n\n"
+                    "📌 Статус изменён на ❌ Мёртвый."
                 )
             else:
                 text = (
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    "✅ ЧАТЫ ОЧИЩЕНЫ\n"
+                    "❌ НЕ УДАЛОСЬ ОЧИСТИТЬ ЧАТЫ\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                     f"📞 {acc.phone}\n\n"
-                    f"📤 Обработано:   {deleted}\n"
-                    f"⚠️ Ошибок:       {failed}\n"
-                    f"📊 Всего было:   {total}\n\n"
-                    "ℹ️ Сессии аккаунта НЕ тронуты."
+                    f"Ошибки: {msg}"
                 )
-        elif msg == "FROZEN":
-            db.update_account_status(acc.id, "dead")
-            db.log_action(uid, "frozen", details="clear_chats",
-                          account_id=acc.id)
-            text = (
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                "🧊 АККАУНТ ЗАМОРОЖЕН TELEGRAM\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📞 {acc.phone}\n\n"
-                "Очистка чатов недоступна.\n\n"
-                "📌 Статус изменён на ❌ Мёртвый."
-            )
-        else:
-            text = (
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                "❌ НЕ УДАЛОСЬ ОЧИСТИТЬ ЧАТЫ\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📞 {acc.phone}\n\n"
-                f"Ошибки: {msg}"
-            )
 
-        markup = kbd.kb([
-            [kbd.btn("🔄 ПОВТОРИТЬ", f"acc_clear_chats_{acc_id}_{page}")],
-            [kbd.btn("🔙 К АККАУНТУ", f"acc_view_{acc_id}_{page}")],
-            [kbd.btn("🏠 МЕНЮ", "main_menu")],
-        ])
-        await edit_or_send(bot, call, text, markup)
+            markup = kbd.kb([
+                [kbd.btn("🔄 ПОВТОРИТЬ", f"acc_clear_chats_{acc_id}_{origin}")],
+                [kbd.btn("🔙 К АККАУНТУ", f"acc_view_{acc_id}_{origin}")],
+                [kbd.btn("🏠 МЕНЮ", "main_menu")],
+            ])
+            await edit_or_send(bot, call, text, markup)
+        finally:
+            ctx.unlock_account(acc_id)
 
     @bot.callback_query_handler(func=lambda c: c.data == "del_dead")
     @admin_required

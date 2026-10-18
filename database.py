@@ -550,15 +550,47 @@ _ACCOUNT_COLUMNS = [
 ]
 
 
+def _existing_columns(table_name: str) -> set:
+    """
+    Возвращает множество имён колонок, которые уже есть в таблице.
+
+    :param table_name: имя таблицы.
+    :return: set с именами колонок (пустой при ошибке).
+    """
+    try:
+        with engine.connect() as conn:
+            if engine.name == "sqlite":
+                rows = conn.execute(
+                    text(f"PRAGMA table_info({table_name})")
+                ).fetchall()
+                return {row[1] for row in rows}
+            else:
+                rows = conn.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = :t"
+                    ),
+                    {"t": table_name},
+                ).fetchall()
+                return {row[0] for row in rows}
+    except Exception as e:
+        logger.warning(f"[_existing_columns] {table_name}: {e}")
+        return set()
+
+
 def _migrate() -> None:
     """
     Добавляет недостающие колонки в таблицу accounts.
 
-    Для каждой колонки из _ACCOUNT_COLUMNS пытается выполнить
-    ALTER TABLE ADD COLUMN. Ошибки (колонка уже есть) игнорирует.
+    Сначала получает список уже существующих колонок одним запросом
+    и выполняет ALTER TABLE только для тех, которых действительно нет.
     Также заполняет дефолтные значения у существующих записей.
     """
+    existing = _existing_columns("accounts")
+
     for col, ddl in _ACCOUNT_COLUMNS:
+        if existing and col in existing:
+            continue
         try:
             with engine.begin() as conn:
                 conn.execute(text(f"ALTER TABLE accounts ADD COLUMN {col} {ddl}"))
@@ -585,36 +617,58 @@ def _migrate() -> None:
 
 def _migrate_encrypt_sessions() -> None:
     """
-    Шифрует plaintext session_string у существующих записей.
+    Шифрует plaintext session_string и two_fa у существующих записей.
 
-    Проходит по всем строкам accounts, находит те, где session
-    не начинается с FERNET_MARKER, и шифрует их на месте.
+    Проходит по всем строкам accounts, находит те, где session или
+    two_fa не начинаются с FERNET_MARKER, и шифрует их на месте.
     """
     try:
         f = _get_fernet()
 
         with engine.begin() as conn:
             rows = conn.execute(
-                text("SELECT id, session FROM accounts WHERE session IS NOT NULL")
+                text(
+                    "SELECT id, session, two_fa FROM accounts "
+                    "WHERE session IS NOT NULL OR two_fa IS NOT NULL"
+                )
             ).fetchall()
 
-        to_encrypt = []
-        for row_id, raw in rows:
-            if raw and isinstance(raw, str) and not raw.startswith(FERNET_MARKER):
-                to_encrypt.append((row_id, raw))
+        to_update = []
+        for row_id, raw_session, raw_two_fa in rows:
+            new_session = None
+            new_two_fa = None
+            if raw_session and isinstance(raw_session, str) \
+                    and not raw_session.startswith(FERNET_MARKER):
+                new_session = f.encrypt(raw_session.encode("utf-8")).decode("ascii")
+            if raw_two_fa and isinstance(raw_two_fa, str) \
+                    and not raw_two_fa.startswith(FERNET_MARKER):
+                new_two_fa = f.encrypt(raw_two_fa.encode("utf-8")).decode("ascii")
+            if new_session is not None or new_two_fa is not None:
+                to_update.append((row_id, new_session, new_two_fa))
 
-        if not to_encrypt:
+        if not to_update:
             return
 
         with engine.begin() as conn:
-            for row_id, raw in to_encrypt:
-                enc = f.encrypt(raw.encode("utf-8")).decode("ascii")
-                conn.execute(
-                    text("UPDATE accounts SET session = :s WHERE id = :id"),
-                    {"s": enc, "id": row_id}
-                )
+            for row_id, new_session, new_two_fa in to_update:
+                if new_session is not None and new_two_fa is not None:
+                    conn.execute(
+                        text("UPDATE accounts SET session = :s, two_fa = :t "
+                             "WHERE id = :id"),
+                        {"s": new_session, "t": new_two_fa, "id": row_id}
+                    )
+                elif new_session is not None:
+                    conn.execute(
+                        text("UPDATE accounts SET session = :s WHERE id = :id"),
+                        {"s": new_session, "id": row_id}
+                    )
+                else:
+                    conn.execute(
+                        text("UPDATE accounts SET two_fa = :t WHERE id = :id"),
+                        {"t": new_two_fa, "id": row_id}
+                    )
 
-        logger.info(f"🔐 Зашифровано session_string: {len(to_encrypt)}")
+        logger.info(f"🔐 Зашифровано строк (session/two_fa): {len(to_update)}")
     except Exception as e:
         logger.error(f"❌ _migrate_encrypt_sessions: {type(e).__name__}: {e}")
         logger.debug(traceback.format_exc())
@@ -623,7 +677,7 @@ def _migrate_encrypt_sessions() -> None:
 def init_db() -> None:
     """
     Инициализирует БД: создаёт таблицы, прогоняет миграции,
-    шифрует legacy session, восстанавливает из бэкапа.
+    шифрует legacy session/two_fa, восстанавливает из бэкапа.
 
     Вызывается один раз при старте бота.
     """
@@ -743,6 +797,54 @@ def get_favorites():
                 .filter(Account.favorite == 1)
                 .order_by(Account.id.desc())
                 .all())
+
+
+def get_country_groups() -> list:
+    """
+    Группирует активные аккаунты по country_code для "папок" в хранилище.
+
+    Аккаунты без определённой страны (country_code пуст или NULL)
+    собираются в одну группу с кодом "" — её нужно отдельно подписать
+    как "без страны" при отображении.
+
+    :return: список словарей {"code": str, "count": int}, отсортированный
+        по убыванию количества аккаунтов (при равенстве — по коду).
+    """
+    with scope() as s:
+        rows = (
+            s.query(Account.country_code, func.count(Account.id))
+            .filter(Account.deleted_at.is_(None))
+            .group_by(Account.country_code)
+            .all()
+        )
+    groups = [{"code": (code or ""), "count": cnt} for code, cnt in rows]
+    groups.sort(key=lambda g: (-g["count"], g["code"]))
+    return groups
+
+
+def get_accounts_by_country(country_code: str):
+    """
+    Возвращает активные аккаунты заданной страны (избранные — первыми).
+
+    Пустая строка в country_code соответствует группе "без страны"
+    (country_code пуст или NULL в БД).
+
+    :param country_code: код страны ("RU", "US", ... или "" для
+        аккаунтов без определённой страны).
+    :return: список объектов Account.
+    """
+    with scope() as s:
+        q = s.query(Account).filter(Account.deleted_at.is_(None))
+        if country_code:
+            q = q.filter(Account.country_code == country_code)
+        else:
+            q = q.filter(
+                (Account.country_code.is_(None)) | (Account.country_code == "")
+            )
+        return q.order_by(
+            Account.favorite.desc(),
+            Account.id.desc(),
+        ).all()
 
 
 def get_archived_accounts():

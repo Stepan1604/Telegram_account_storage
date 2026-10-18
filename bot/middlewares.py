@@ -28,6 +28,18 @@ class AdminMiddleware(BaseMiddleware):
         self.bot = bot
         self.update_types = ["message", "callback_query"]
 
+        # ADMINS пустой — валидная, но крайне подозрительная конфигурация:
+        # middleware формально "безопасен" (CancelUpdate для всех), но
+        # бот фактически никому не доступен, и чаще всего это признак
+        # ошибки в config.py (например, ADMIN_ID не задан), а не
+        # осознанное решение. Предупреждаем явно и громко при старте,
+        # чтобы это не осталось незамеченным в потоке обычных логов.
+        if not ADMINS:
+            logger.warning(
+                "⚠️⚠️⚠️ ADMINS пуст! Бот не ответит НИ ОДНОМУ пользователю.\n"
+                "   Проверь ADMIN_ID / ADMINS в config.py."
+            )
+
     async def pre_process(self, message, data):
         """
         Проверяет пользователя до передачи обновления в хендлер.

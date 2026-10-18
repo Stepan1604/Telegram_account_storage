@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Set
 
 
 class Context:
@@ -16,6 +16,9 @@ class Context:
         buy_ctx — контекст покупки LZT (страна, кол-во)
         buy_cancel — флаги отмены закупки LZT
         auto_clean_tasks — задачи автоочистки (по account_id)
+        busy_accounts — ID аккаунтов, для которых сейчас выполняется
+            одиночная операция (очистка сессий / очистка чатов), чтобы
+            не дать запустить вторую такую же операцию по двойному клику
         schedule_auto_clean — функция, устанавливается из clean.py
     """
 
@@ -37,6 +40,9 @@ class Context:
 
         # Автоочистка
         self.auto_clean_tasks: Dict[int, asyncio.Task] = {}
+
+        # Защита от двойного запуска одиночных операций над аккаунтом
+        self.busy_accounts: Set[int] = set()
 
         # Устанавливается в clean.py (после определения schedule_auto_clean)
         self.schedule_auto_clean: Optional[Callable] = None
@@ -78,3 +84,38 @@ class Context:
     def pop_auto_clean_task(self, account_id: int) -> Optional[asyncio.Task]:
         """Забирает и возвращает задачу автоочистки (для отмены)."""
         return self.auto_clean_tasks.pop(account_id, None)
+
+    # --------------------------------------------------------------------- #
+    #                 ЗАЩИТА ОТ ДВОЙНОГО ЗАПУСКА ПО АККАУНТУ                #
+    # --------------------------------------------------------------------- #
+
+    def try_lock_account(self, account_id: int) -> bool:
+        """
+        Пытается пометить аккаунт как "занятый" текущей операцией.
+
+        Используется перед запуском длительных одиночных операций
+        (очистка сессий, очистка чатов) по конкретному аккаунту, чтобы
+        двойное нажатие кнопки не запустило два параллельных
+        reset_other_sessions/clear_dialogs_only для одного и того же
+        аккаунта.
+
+        :param account_id: ID аккаунта.
+        :return: True, если удалось занять (аккаунт был свободен);
+            False, если аккаунт уже занят другой операцией.
+        """
+        if account_id in self.busy_accounts:
+            return False
+        self.busy_accounts.add(account_id)
+        return True
+
+    def unlock_account(self, account_id: int) -> None:
+        """
+        Снимает пометку "занят" с аккаунта.
+
+        Вызывается в finally после завершения одиночной операции
+        (успешной или нет), чтобы аккаунт снова стал доступен для
+        новых действий.
+
+        :param account_id: ID аккаунта.
+        """
+        self.busy_accounts.discard(account_id)
