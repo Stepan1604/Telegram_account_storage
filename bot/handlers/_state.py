@@ -58,7 +58,22 @@ class Context:
         return task is not None and not task.done()
 
     def set_running_task(self, user_id: int, task: asyncio.Task) -> None:
+        """
+        Устанавливает новую фоновую задачу.
+
+        При установке предыдущая задача (если есть и не завершена)
+        отменяется. Новая задача сохраняется в running_tasks.
+        """
+        old = self.running_tasks.get(user_id)
+        if old is not None and not old.done():
+            old.cancel()
         self.running_tasks[user_id] = task
+
+    def cancel_running_task(self, user_id: int) -> None:
+        """Отменяет фоновую задачу пользователя и удаляет запись."""
+        task = self.running_tasks.pop(user_id, None)
+        if task is not None and not task.done():
+            task.cancel()
 
     def pop_auto_clean_task(self, account_id: int) -> Optional[asyncio.Task]:
         """Забирает и возвращает задачу автоочистки (для отмены)."""

@@ -29,7 +29,11 @@ def setup_logging():
     if root.handlers:
         root.handlers.clear()
 
-    console = logging.StreamHandler(sys.stdout)
+    if sys.platform.startswith("win"):
+        import codecs
+        console = logging.StreamHandler(codecs.getwriter("utf-8")(sys.stdout.buffer, "strict"))
+    else:
+        console = logging.StreamHandler(sys.stdout)
     console.setFormatter(fmt)
     root.addHandler(console)
 
@@ -63,7 +67,7 @@ def check_encryption_key():
     try:
         if os.path.exists("data/secret.key"):
             size = os.path.getsize("data/secret.key")
-            logger.info(f"🔐 Шифрование session включено (secret.key, {size} байт)")
+            logger.info(f"🔐 Шифрование session включено (data/secret.key, {size} байт)")
         elif os.path.exists("secret.key"):
             size = os.path.getsize("secret.key")
             logger.info(f"🔐 Шифрование session включено (secret.key, {size} байт)")
@@ -81,15 +85,24 @@ async def notify_startup():
     """
     Отправляет всем админам уведомление о запуске бота.
 
-    В сообщении — текущее время и статистика хранилища (всего,
-    очищено, не очищено, мёртвых).
+    В сообщении — текущее время, какая БД используется
+    (основная PostgreSQL или fallback SQLite) и статистика
+    хранилища (всего, очищено, не очищено, мёртвых).
     """
     import database as db
 
     s = db.get_accounts_stats()
+    info = db.get_db_info()
+
+    if info["fallback"]:
+        db_line = "💾 БД: ⚠️ локальная SQLite (fallback)\n"
+    else:
+        db_line = f"💾 БД: ✅ {info['engine_name']}\n"
+
     text = (
         "🚀 *БОТ ЗАПУЩЕН*\n\n"
         f"🕒 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n\n"
+        f"{db_line}\n"
         "📊 *Хранилище:*\n"
         f"• Всего: *{s['total']}*\n"
         f"• Очищено: *{s['cleaned']}*\n"
@@ -152,6 +165,8 @@ async def main():
     Порядок:
       1. Проверка ключа шифрования.
       2. Инициализация БД (создание таблиц, миграции, restore из бэкапа).
+         Если PostgreSQL недоступен — автоматически переключается
+         на локальную SQLite (см. database._init_engine).
       3. Регистрация middleware для проверки прав админа.
       4. Регистрация всех хендлеров.
       5. Уведомление админов о запуске.
@@ -168,13 +183,21 @@ async def main():
 
     try:
         db.init_db()
-        logger.info("✅ БД инициализирована")
+        info = db.get_db_info()
+        if info["fallback"]:
+            logger.warning(
+                f"✅ БД инициализирована (fallback SQLite: {info['url']})"
+            )
+        else:
+            logger.info(
+                f"✅ БД инициализирована ({info['engine_name']}: {info['url']})"
+            )
     except Exception as e:
         logger.exception(f"❌ Ошибка БД: {e}")
         return
 
     try:
-        bot.setup_middleware(AdminMiddleware())
+        bot.setup_middleware(AdminMiddleware(bot))
         logger.info("✅ Middleware зарегистрирован")
     except Exception as e:
         logger.warning(f"⚠️ Middleware: {e}")

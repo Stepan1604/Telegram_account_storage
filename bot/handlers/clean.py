@@ -325,9 +325,12 @@ def register(ctx):
             await edit_or_send(bot, call, "📦 Хранилище пусто.",
                                kbd.back_main())
             return
-        if ctx.has_running_task(uid):
-            await edit_or_send(bot, call, "⏳ Уже идёт...", kbd.back_main())
-            return
+        # Если есть завершённая запись — сбрасываем её, иначе если
+        # задача ещё не завершилась — отменяем её.
+        old = ctx.running_tasks.get(uid)
+        if old is not None and not old.done():
+            old.cancel()
+        ctx.running_tasks.pop(uid, None)
 
         task = asyncio.create_task(
             _check_all(call.message.chat.id, call.message.message_id,
@@ -472,9 +475,12 @@ def register(ctx):
         if not accounts:
             await edit_or_send(bot, call, "✅ Нечего", kbd.back_main())
             return
-        if ctx.has_running_task(uid):
-            await edit_or_send(bot, call, "⏳ Уже идёт...", kbd.back_main())
-            return
+        # Сбрасываем предыдущую задачу (если есть завершённая — убираем
+        # запись, если идёт — отменяем), чтобы можно было перезапустить.
+        old = ctx.running_tasks.get(uid)
+        if old is not None and not old.done():
+            old.cancel()
+        ctx.running_tasks.pop(uid, None)
 
         task = asyncio.create_task(
             _clean_all(call.message.chat.id, call.message.message_id,

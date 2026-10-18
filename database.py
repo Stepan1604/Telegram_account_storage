@@ -17,13 +17,19 @@ from sqlalchemy.types import TypeDecorator
 try:
     from config import DB_URL, SESSION_ENCRYPTION_KEY
 except Exception:
-    DB_URL = "sqlite:///storage.db"
+    DB_URL = ""
     SESSION_ENCRYPTION_KEY = ""
 
 logger = logging.getLogger(__name__)
 
-BACKUP_FILE = "data/accounts_backup.json"
-KEY_FILE = "secret.key"
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_DATA_DIR = os.path.join(_BASE_DIR, "data")
+os.makedirs(_DATA_DIR, exist_ok=True)
+
+BACKUP_FILE = os.path.join(_DATA_DIR, "accounts_backup.json")
+KEY_FILE = os.path.join(_DATA_DIR, "secret.key")
+FALLBACK_DB_PATH = os.path.join(_DATA_DIR, "storage.db")
+FALLBACK_SQLITE_URL = f"sqlite:///{FALLBACK_DB_PATH}"
 
 
 def _to_sync(url: str) -> str:
@@ -37,7 +43,7 @@ def _to_sync(url: str) -> str:
     :return: синхронный URL.
     """
     if not url:
-        return "sqlite:///storage.db"
+        return FALLBACK_SQLITE_URL
     if "+asyncpg" in url:
         return url.replace("+asyncpg", "+psycopg2")
     if url.startswith("postgresql://"):
@@ -45,16 +51,99 @@ def _to_sync(url: str) -> str:
     return url
 
 
-engine = create_engine(
-    _to_sync(DB_URL),
-    pool_pre_ping=True,
-    pool_recycle=280,
-    future=True,
-)
+PRIMARY_DB_URL = _to_sync(DB_URL)
 
-Session = scoped_session(
-    sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-)
+engine = None
+Session = None
+USING_FALLBACK = False
+
+
+def _safe_url(url: str) -> str:
+    """
+    Убирает логин и пароль из строки подключения для логов.
+
+    :param url: строка подключения.
+    :return: строка без user:pass.
+    """
+    if "@" in url:
+        return url.split("@", 1)[-1]
+    return url
+
+
+def _try_connect(url: str, timeout: int = 5):
+    """
+    Пробует создать engine и проверить соединение с БД.
+
+    Для PostgreSQL использует connect_timeout, чтобы не ждать долго
+    при недоступном хосте. Выполняет SELECT 1 для проверки.
+
+    :param url: строка подключения.
+    :param timeout: таймаут подключения в секундах.
+    :return: engine при успехе, иначе None.
+    """
+    try:
+        kwargs = {
+            "pool_pre_ping": True,
+            "pool_recycle": 280,
+            "future": True,
+        }
+        if url.startswith("postgresql"):
+            kwargs["connect_args"] = {"connect_timeout": timeout}
+        eng = create_engine(url, **kwargs)
+        with eng.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return eng
+    except Exception as e:
+        logger.warning(
+            f"[db] Не удалось подключиться к {_safe_url(url)}: "
+            f"{type(e).__name__}: {e}"
+        )
+        return None
+
+
+def _init_engine() -> None:
+    """
+    Инициализирует engine: пробует основную БД (PostgreSQL),
+    при неудаче — переключается на локальную SQLite.
+
+    Устанавливает глобальные engine, Session и флаг USING_FALLBACK.
+    Логирует, какая БД реально используется.
+    """
+    global engine, Session, USING_FALLBACK
+
+    if DB_URL and not DB_URL.startswith("sqlite"):
+        logger.info("[db] Проверяю подключение к основной БД (PostgreSQL)...")
+        eng = _try_connect(PRIMARY_DB_URL)
+    else:
+        eng = None
+
+    if eng is not None:
+        engine = eng
+        USING_FALLBACK = False
+        logger.info(f"✅ Основная БД доступна: {_safe_url(PRIMARY_DB_URL)}")
+    else:
+        if DB_URL and not DB_URL.startswith("sqlite"):
+            logger.warning(
+                "⚠️ PostgreSQL недоступен — переключаюсь на локальную SQLite"
+            )
+        else:
+            logger.info("[db] DB_URL не задан или SQLite — использую локальную БД")
+        os.makedirs(os.path.dirname(FALLBACK_DB_PATH), exist_ok=True)
+        engine = create_engine(
+            FALLBACK_SQLITE_URL,
+            pool_pre_ping=True,
+            pool_recycle=280,
+            future=True,
+        )
+        USING_FALLBACK = True
+        logger.info(f"✅ Локальная БД: {FALLBACK_SQLITE_URL}")
+
+    Session = scoped_session(
+        sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    )
+
+
+_init_engine()
 
 Base = declarative_base()
 
@@ -146,9 +235,6 @@ class EncryptedText(TypeDecorator):
     Legacy plaintext (без префикса FERNET_MARKER) возвращается как есть.
     Если токен повреждён — возвращает пустую строку, чтобы Telethon
     не падал с ValueError.
-
-    :param value: значение для шифрования/расшифровки.
-    :return: зашифрованная или расшифрованная строка.
     """
     impl = Text
     cache_ok = True
@@ -198,7 +284,10 @@ class Account(Base):
     phone = Column(String(32), unique=True, index=True, nullable=False)
     name = Column(String(64), default="")
     session = Column(EncryptedText, nullable=False)
-    two_fa = Column(Text, default="")
+    # EncryptedText: расшифрует legacy Fernet-значения при чтении и
+    # шифрует plaintext при записи. Миграция ALTER TABLE не нужна —
+    # в БД тип колонки остаётся TEXT.
+    two_fa = Column(EncryptedText, default="")
     registered_at = Column(DateTime, default=datetime.now)
     status = Column(String(16), default="uncleaned")
 
@@ -382,32 +471,41 @@ def load_backup() -> list:
 
 def restore_from_backup() -> int:
     """
-    Восстанавливает аккаунты из бэкапа в БД.
+    Дополняет БД аккаунтами из бэкапа.
 
-    Если БД пуста — восстанавливает все. Если нет — не трогает
-    (защита от случайного затирания).
+    Восстанавливает только те номера, которых нет в БД (включая
+    архивные). Существующие аккаунты не трогает.
 
     :return: количество восстановленных аккаунтов.
     """
     data = load_backup()
     if not data:
         return 0
+
+    restored = 0
     try:
         with scope() as s:
-            if s.query(Account).filter(Account.deleted_at.is_(None)).count() > 0:
-                return 0
-            restored = 0
+            existing_phones = {row[0] for row in s.query(Account.phone).all()}
+            logger.info(f"[restore] В БД: {len(existing_phones)}, "
+                        f"в бэкапе: {len(data)}")
+
             for item in data:
                 try:
                     phone = normalize_phone(item.get("phone", ""))
                     session = item.get("session", "")
                     if not phone or not session:
                         continue
+
+                    if phone in existing_phones:
+                        continue
+
                     reg = item.get("registered_at")
                     try:
-                        reg_dt = datetime.fromisoformat(reg) if reg else datetime.now()
+                        reg_dt = (datetime.fromisoformat(reg)
+                                  if reg else datetime.now())
                     except Exception:
                         reg_dt = datetime.now()
+
                     s.add(Account(
                         phone=phone,
                         name=item.get("name") or phone,
@@ -421,14 +519,20 @@ def restore_from_backup() -> int:
                         lzt_item_id=item.get("lzt_item_id"),
                         favorite=item.get("favorite", 0) or 0,
                     ))
+                    existing_phones.add(phone)
                     restored += 1
+                    logger.info(f"[restore] + {phone}")
                 except Exception as e:
-                    logger.warning(f"⚠️ Запись пропущена: {e}")
+                    logger.warning(f"⚠️ Запись {item.get('phone')} "
+                                   f"пропущена: {e}")
     except Exception as e:
         logger.error(f"❌ restore_from_backup: {e}")
         return 0
+
     if restored:
         logger.info(f"♻️ Восстановлено из бэкапа: {restored}")
+    else:
+        logger.info("[restore] Нечего восстанавливать")
     return restored
 
 
@@ -452,7 +556,6 @@ def _migrate() -> None:
 
     Для каждой колонки из _ACCOUNT_COLUMNS пытается выполнить
     ALTER TABLE ADD COLUMN. Ошибки (колонка уже есть) игнорирует.
-
     Также заполняет дефолтные значения у существующих записей.
     """
     for col, ddl in _ACCOUNT_COLUMNS:
@@ -683,9 +786,10 @@ def get_account_by_phone(phone: str):
 
 def delete_account(account_id: int) -> bool:
     """
-    Полностью удаляет аккаунт из БД.
+    Полностью удаляет аккаунт из БД и из бэкапа.
 
-    Обновляет бэкап. При следующем старте бота аккаунт НЕ вернётся.
+    Используется, когда аккаунт удаляет сам бот (кнопка "Удалить").
+    При следующем старте бота аккаунт НЕ вернётся.
 
     :param account_id: ID аккаунта.
     :return: True.
@@ -695,6 +799,24 @@ def delete_account(account_id: int) -> bool:
         if acc:
             s.delete(acc)
     save_backup()
+    return True
+
+
+def delete_account_soft(account_id: int) -> bool:
+    """
+    Мягко удаляет аккаунт: только из БД, бэкап не трогает.
+
+    При следующем старте бота аккаунт восстановится из бэкапа.
+    Используется для ручного удаления через SQL/скрипты, когда
+    нужно временно скрыть аккаунт.
+
+    :param account_id: ID аккаунта.
+    :return: True.
+    """
+    with scope() as s:
+        acc = s.get(Account, account_id)
+        if acc:
+            s.delete(acc)
     return True
 
 
@@ -711,7 +833,6 @@ def archive_account(account_id: int) -> bool:
         acc = s.get(Account, account_id)
         if acc:
             acc.deleted_at = datetime.now()
-    save_backup()
     return True
 
 
@@ -1186,4 +1307,21 @@ def get_lzt_stats() -> dict:
         "failed": failed,
         "bought": bought,
         "spent_rub": int(spent or 0),
+    }
+
+
+def get_db_info() -> dict:
+    """
+    Возвращает информацию о текущем подключении к БД.
+
+    Используется для отображения в стартовом уведомлении и
+    для отладки на разных машинах (ПК / телефон).
+
+    :return: словарь с ключами url, fallback, engine_name.
+    """
+    url = _safe_url(str(engine.url)) if engine else "—"
+    return {
+        "url": url,
+        "fallback": USING_FALLBACK,
+        "engine_name": engine.name if engine else "—",
     }

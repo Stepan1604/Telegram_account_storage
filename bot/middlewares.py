@@ -1,6 +1,7 @@
 import logging
 
-from telebot.asyncio_handler_backends import BaseMiddleware
+from telebot import types
+from telebot.asyncio_handler_backends import BaseMiddleware, CancelUpdate
 
 from config import ADMINS
 
@@ -11,33 +12,29 @@ class AdminMiddleware(BaseMiddleware):
     """
     Глобальный middleware для проверки прав администратора.
 
-    Перехватывает все входящие message и callback_query до того, как
-    они попадут в хендлеры. Если user_id отправителя не входит в
-    ADMINS — отменяет обработку и, где возможно, показывает
-    всплывающее уведомление "⛔ Нет доступа".
+    Перехватывает все входящие message и callback_query до хендлеров.
+    Если user_id отправителя не входит в ADMINS — отменяет обработку
+    (CancelUpdate) и для callback_query показывает всплывающее
+    уведомление "⛔ Нет доступа".
 
-    Работает как единая точка защиты от не-админов, дополняя
-    декоратор admin_required.
+    Дополняет декоратор admin_required.
     """
 
-    def __init__(self):
+    def __init__(self, bot):
         """
-        Инициализирует middleware и задаёт типы обновлений для перехвата.
+        :param bot: экземпляр AsyncTeleBot (нужен для answer_callback_query).
         """
         super().__init__()
+        self.bot = bot
         self.update_types = ["message", "callback_query"]
 
     async def pre_process(self, message, data):
         """
         Проверяет пользователя до передачи обновления в хендлер.
 
-        Если пользователь не админ — логирует отказ, пытается
-        отправить всплывающее уведомление (для callback_query) и
-        возвращает {"cancel": True}, чтобы telebot пропустил хендлер.
-
         :param message: объект Message или CallbackQuery.
         :param data: словарь с данными обновления.
-        :return: data при успехе, {"cancel": True} при отказе.
+        :return: CancelUpdate() для не-админа, иначе None (пропустить).
         """
         user = getattr(message, "from_user", None)
 
@@ -47,11 +44,23 @@ class AdminMiddleware(BaseMiddleware):
             logger.warning(
                 f"[AdminMiddleware] отказ: user_id={uid} {username}"
             )
-            if hasattr(message, "answer"):
+            if isinstance(message, types.CallbackQuery):
                 try:
-                    await message.answer("⛔ Нет доступа", show_alert=True)
+                    await self.bot.answer_callback_query(
+                        message.id, "⛔ Нет доступа", show_alert=True
+                    )
                 except Exception:
                     pass
-            return {"cancel": True}
+            return CancelUpdate()
 
-        return data
+    async def post_process(self, message, data, exception=None):
+        """
+        Вызывается после хендлера. Обязателен: в BaseMiddleware метод
+        бросает NotImplementedError.
+
+        Здесь только логируем ошибку хендлера, если она была.
+        """
+        if exception:
+            logger.error(
+                f"[handler] {type(exception).__name__}: {exception}"
+            )

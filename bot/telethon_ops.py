@@ -172,11 +172,11 @@ async def read_login_code(session_string: str, phone: str):
     """
     if not session_string:
         return None, "Нет session"
+    c = await _get_client(phone, session_string)
+    if not await c.is_user_authorized():
+        await close_client(phone)
+        return None, "Сессия не авторизована"
     try:
-        c = await _get_client(phone, session_string)
-        if not await c.is_user_authorized():
-            await close_client(phone)
-            return None, "Сессия не авторизована"
         await asyncio.sleep(2)
         async for msg in c.iter_messages(777000, limit=15):
             if msg and msg.message:
@@ -215,15 +215,15 @@ async def get_account_info(session_string: str, phone: str) -> dict:
         result["error"] = "Нет session"
         return result
 
-    client = make_client(session_string)
+    c = await _get_client(phone, session_string)
     try:
-        await asyncio.wait_for(client.connect(), timeout=15)
-        if not await client.is_user_authorized():
+        if not await c.is_user_authorized():
+            await close_client(phone)
             result["error"] = "Сессия не авторизована"
             return result
 
         try:
-            me = await asyncio.wait_for(client.get_me(), timeout=10)
+            me = await asyncio.wait_for(c.get_me(), timeout=10)
             if me:
                 result["first_name"] = me.first_name or ""
                 result["last_name"] = me.last_name or ""
@@ -235,7 +235,7 @@ async def get_account_info(session_string: str, phone: str) -> dict:
         try:
             from telethon.tl.functions.account import GetAuthorizationsRequest
             auths = await asyncio.wait_for(
-                client(GetAuthorizationsRequest()), timeout=15
+                c(GetAuthorizationsRequest()), timeout=15
             )
             result["sessions"] = len(auths.authorizations or [])
         except Exception as e:
@@ -243,7 +243,7 @@ async def get_account_info(session_string: str, phone: str) -> dict:
 
         try:
             dialogs = await asyncio.wait_for(
-                client.get_dialogs(limit=None), timeout=30
+                c.get_dialogs(limit=None), timeout=30
             )
             chats = channels = groups = 0
             for d in dialogs:
@@ -277,7 +277,7 @@ async def get_account_info(session_string: str, phone: str) -> dict:
         logger.error(f"[acc_info] {phone}: {type(e).__name__}: {e}")
         result["error"] = f"Ошибка: {str(e)[:120]}"
     finally:
-        await _safe_disconnect(client)
+        close_client(phone)
     return result
 
 
@@ -610,6 +610,8 @@ async def set_2fa_password(client, new_password: str,
                 timeout=30,
             )
         return True, "OK"
+    except errors.PasswordMustAttemptError as e:
+        return False, "Неверный пароль. Повторите ввод текущего пароля 2FA"
     except errors.PasswordHashInvalidError:
         return False, "Неверный текущий пароль 2FA"
     except Exception as e:
