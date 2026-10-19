@@ -213,12 +213,17 @@ def register(ctx):
 
             if msg_id:
                 tail = "\n".join(detail[-5:])
+                next_phone = accounts[i].phone if i < total else None
+                current_line = (
+                    f"📞 Следующий: {next_phone}" if next_phone
+                    else "📞 Следующий: все обработаны"
+                )
                 await safe_edit(
                     bot, chat_id, msg_id,
                     "🔥 ПРОГРЕВ СЕССИЙ\n\n"
                     f"📊 Прогресс: {i}/{total}\n\n"
                     f"✅ Успешно: {ok}\n❌ Ошибок: {fail}\n\n"
-                    f"📞 Текущий: {acc.phone}\n\n"
+                    f"{current_line}\n\n"
                     f"Последние:\n{tail}",
                 )
             await asyncio.sleep(3)

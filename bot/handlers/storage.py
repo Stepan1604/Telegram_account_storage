@@ -85,8 +85,7 @@ def register(ctx):
                 f"⭐ Избранных: {stats.get('favorites', 0)}\n\n"
                 "Выберите аккаунт или папку страны:"
             )
-            markup = kbd.storage_root_kb(favorites, groups,
-                                         fav_page_size=PAGE_SIZE)
+            markup = kbd.storage_root_kb(favorites, groups)
 
         if call:
             await edit_or_send(bot, call, text, markup)

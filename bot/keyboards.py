@@ -89,37 +89,23 @@ def _country_token_to_code(token: str) -> str:
     return "" if token == NO_COUNTRY_TOKEN else token
 
 
-def storage_root_kb(favorites, groups,
-                    fav_page_size: int = 5) -> types.InlineKeyboardMarkup:
+def storage_root_kb(favorites, groups) -> types.InlineKeyboardMarkup:
     """
-    Клавиатура корня хранилища: сначала избранные (до fav_page_size
-    штук, с ссылкой на полный список, если их больше), затем папки
-    стран со счётчиком аккаунтов в каждой.
+    Клавиатура корня хранилища: папка "⭐ Избранные" первой (если
+    избранные есть), затем папки стран со счётчиком аккаунтов в каждой.
 
-    :param favorites: список избранных объектов Account (favorite=1).
+    :param favorites: список избранных объектов Account (favorite=1) —
+        используется только для подсчёта, сами аккаунты не выводятся
+        здесь напрямую, открываются через папку.
     :param groups: список словарей {"code", "count"} из
         db.get_country_groups().
-    :param fav_page_size: сколько избранных показать прямо здесь,
-        не отправляя на отдельную страницу.
     :return: InlineKeyboardMarkup.
     """
     rows = []
 
-    shown_favs = favorites[:fav_page_size]
-    for acc in shown_favs:
-        emoji = {
-            "cleaned": "🧹",
-            "uncleaned": "⚠️",
-            "dead": "❌",
-        }.get(acc.status, "•")
-        label = acc.name or acc.phone
-        # origin "r" — аккаунт открыт из корня хранилища, кнопка
-        # "Назад" на его карточке должна вернуть сюда же.
-        rows.append([btn(f"⭐ {emoji} {label}", f"acc_view_{acc.id}_r")])
-
-    if len(favorites) > fav_page_size:
+    if favorites:
         rows.append([
-            btn(f"⭐ ВСЕ ИЗБРАННЫЕ ({len(favorites)})", "favorites")
+            btn(f"⭐ ИЗБРАННЫЕ ({len(favorites)})", "favorites")
         ])
 
     for g in groups:
@@ -207,7 +193,7 @@ def favorites_page(accounts, page: int, total_pages: int,
     if page < total_pages - 1:
         nav.append(btn("➡️", f"favorites_page_{page + 1}"))
     rows.append(nav)
-    rows.append([btn("🔙 НАЗАД", "main_menu")])
+    rows.append([btn("🔙 К СПИСКУ СТРАН", "storage")])
     return kb(rows)
 
 
