@@ -84,6 +84,10 @@ async def _get_client(phone: str, session_string: str) -> TelegramClient:
     Кэширует клиенты по номеру телефона. Если в кэше есть клиент, но
     он отключён, создаёт новый.
 
+    Если connect() падает — созданный клиент немедленно закрывается и
+    удаляется из _all_clients, чтобы не копить «висящие» TCP-соединения
+    и «грязные» клиенты в глобальном реестре.
+
     :param phone: номер телефона (ключ кэша).
     :param session_string: строка сессии.
     :return: подключённый TelegramClient.
@@ -95,7 +99,11 @@ async def _get_client(phone: str, session_string: str) -> TelegramClient:
         if c:
             await _safe_disconnect(c)
         c = make_client(session_string)
-        await asyncio.wait_for(c.connect(), timeout=15)
+        try:
+            await asyncio.wait_for(c.connect(), timeout=15)
+        except Exception:
+            await _safe_disconnect(c)
+            raise
         _clients[phone] = c
         return c
 
@@ -123,46 +131,121 @@ async def close_all_clients() -> None:
         await close_client(phone)
 
 
+async def _close_on_error(phone: str) -> None:
+    """
+    Закрывает клиент, чтобы следующий вызов пересоздал его с нуля.
+
+    Используется после технических ошибок, чтобы не переиспользовать
+    «грязное» соединение/состояние клиента.
+
+    :param phone: номер телефона.
+    """
+    try:
+        await close_client(phone)
+    except Exception as e:
+        logger.warning(f"[close_client] {phone}: {e}")
+
+
+async def _classify_call(coro_factory, phone: str, phase: str):
+    """
+    Выполняет корутину, ловит ошибки Telethon и превращает их в
+    (state, info)-пару.
+
+    Возвращает (result, None) при успехе или (None, (state, info))
+    при ошибке. state ∈ {"dead", "unknown"}:
+
+      • "dead"    — Telegram однозначно сообщает, что аккаунт мёртв
+                    (аннулирован ключ, забанен, деактивирован);
+      • "unknown" — проверить не удалось (FloodWait, таймаут, любая
+                    техническая ошибка, включая TypeNotFoundError из-за
+                    устаревшего Telethon).
+
+    :param coro_factory: функция без аргументов, возвращающая корутину.
+    :param phone: номер телефона (для логов).
+    :param phase: метка фазы для логов («auth», «get_me», …).
+    :return: (result, None) или (None, (state, info)).
+    """
+    try:
+        return await coro_factory(), None
+    except errors.AuthKeyUnregisteredError:
+        return None, ("dead", "Ключ аннулирован")
+    except errors.UserDeactivatedBanError:
+        return None, ("dead", "Аккаунт забанен")
+    except errors.UserDeactivatedError:
+        return None, ("dead", "Аккаунт деактивирован")
+    except errors.FloodWaitError as e:
+        return None, ("unknown", f"FloodWait: {e.seconds} сек.")
+    except asyncio.TimeoutError:
+        return None, ("unknown", f"Таймаут {phase}")
+    except Exception as e:
+        logger.error(f"[{phase}] {phone}: {type(e).__name__}: {e}")
+        logger.debug(traceback.format_exc())
+        return None, ("unknown", f"Ошибка {phase}: {str(e)[:120]}")
+
+
 async def is_alive(session_string: str, phone: str):
     """
     Проверяет, жива ли сессия аккаунта.
 
-    Подключается по сессии и проверяет авторизацию через is_user_authorized
-    и get_me. При ошибке авторизации/бане/деактивации закрывает клиент и
-    возвращает False.
+    Возвращает три состояния, чтобы отличить «точно мёртв» от
+    «не смогли проверить по технической причине»:
+
+        ("alive", имя)       — сессия рабочая;
+        ("dead", причина)    — точно мёртв (бан / деактивация /
+                               аннулированный ключ / невалидная сессия);
+        ("unknown", причина) — проверить не удалось (таймаут, FloodWait,
+                               TypeNotFoundError из-за устаревшего
+                               Telethon и т.п.). Статус аккаунта
+                               менять НЕЛЬЗЯ.
 
     :param session_string: строка сессии.
     :param phone: номер телефона.
-    :return: (bool, str) — (True, имя) при успехе; (False, причина) при ошибке.
+    :return: (state, info) — кортеж строк.
     """
     if not session_string:
-        return False, "Нет session"
+        return "dead", "Нет session"
+
     try:
         c = await _get_client(phone, session_string)
-        if not await asyncio.wait_for(c.is_user_authorized(), timeout=10):
-            await close_client(phone)
-            return False, "Сессия не авторизована"
-        me = await asyncio.wait_for(c.get_me(), timeout=10)
-        return (True, me.first_name or "OK") if me else (False, "Нет данных")
     except errors.AuthKeyUnregisteredError:
-        await close_client(phone)
-        return False, "Ключ аннулирован"
+        return "dead", "Ключ аннулирован"
     except errors.UserDeactivatedBanError:
-        return False, "Аккаунт забанен"
+        return "dead", "Аккаунт забанен"
     except errors.UserDeactivatedError:
-        return False, "Аккаунт деактивирован"
+        return "dead", "Аккаунт деактивирован"
+    except errors.FloodWaitError as e:
+        return "unknown", f"FloodWait: {e.seconds} сек."
     except asyncio.TimeoutError:
-        return False, "Таймаут"
+        return "unknown", "Таймаут подключения"
     except Exception as e:
-        logger.error(f"[is_alive] {phone}: {type(e).__name__}: {e}")
+        logger.error(f"[is_alive.connect] {phone}: "
+                     f"{type(e).__name__}: {e}")
         logger.debug(traceback.format_exc())
-        # Непредвиденная ошибка (например, TypeNotFoundError из-за устаревшей
-        # версии Telethon / изменений в TL-схеме Telegram) может означать,
-        # что клиент в кэше остался в "грязном" состоянии. Закрываем и
-        # убираем его из кэша, чтобы следующий вызов пересоздал клиента
-        # с чистого листа, а не переиспользовал битое соединение.
-        await close_client(phone)
-        return False, f"Ошибка: {str(e)[:120]}"
+        return "unknown", f"Ошибка подключения: {str(e)[:120]}"
+
+    authorized, err = await _classify_call(
+        lambda: asyncio.wait_for(c.is_user_authorized(), timeout=10),
+        phone, "auth",
+    )
+    if err:
+        await _close_on_error(phone)
+        return err
+    if not authorized:
+        await _close_on_error(phone)
+        return "dead", "Сессия не авторизована"
+
+    me, err = await _classify_call(
+        lambda: asyncio.wait_for(c.get_me(), timeout=10),
+        phone, "get_me",
+    )
+    if err:
+        await _close_on_error(phone)
+        return err
+    if not me:
+        await _close_on_error(phone)
+        return "unknown", "Нет данных профиля"
+
+    return "alive", me.first_name or "OK"
 
 
 async def read_login_code(session_string: str, phone: str):
@@ -284,12 +367,6 @@ async def get_account_info(session_string: str, phone: str) -> dict:
         logger.debug(traceback.format_exc())
         result["error"] = f"Ошибка: {str(e)[:120]}"
     finally:
-        # БЫЛО: close_client(phone)  — корутина создавалась, но никогда не
-        # авaited'илась (RuntimeWarning: coroutine 'close_client' was never
-        # awaited). Из-за этого клиент не закрывался и не убирался из
-        # кэша _clients, оставаясь висеть с возможным "грязным" состоянием
-        # соединения (что также способствует ошибкам вроде TypeNotFoundError
-        # при последующих запросах к этому же номеру).
         await close_client(phone)
     return result
 

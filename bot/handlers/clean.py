@@ -7,7 +7,12 @@ from telebot import types
 import database as db
 from .. import keyboards as kbd
 from ..decorators import admin_required
-from ..helpers import edit_or_send, safe_edit
+from ..helpers import (
+    edit_or_send,
+    safe_edit,
+    country_label,
+    status_label,
+)
 from ..telethon_ops import (
     is_alive,
     reset_other_sessions,
@@ -25,11 +30,12 @@ PAGE_SIZE = 5
 
 def register(ctx):
     """
-    Регистрирует хендлеры очистки, проверки и автоочистки аккаунтов.
+    Регистрирует хендлеры очистки, проверки, автоочистки и архива.
 
     Включает: автоочистку через AUTO_CLEAN_DELAY после добавления,
     прогрев сессий при старте бота, массовую и одиночную очистку
-    сессий и чатов, проверку живости аккаунтов и удаление мёртвых.
+    сессий и чатов, проверку живости аккаунтов, архивирование
+    «мёртвых» и восстановление из архива.
 
     :param ctx: объект Context с общим состоянием.
     """
@@ -146,6 +152,9 @@ def register(ctx):
         Подключается к каждому аккаунту, проверяет авторизацию и
         обновляет last_checked_at. Показывает прогресс в одном
         сообщении админу. Между аккаунтами пауза 3 секунды.
+
+        В отличие от _check_all, прогрев НЕ меняет статус аккаунта —
+        он только собирает информацию для отображения админу.
         """
         await asyncio.sleep(5)
         accounts = db.get_accounts()
@@ -180,6 +189,17 @@ def register(ctx):
         detail = []
 
         for i, acc in enumerate(accounts, 1):
+            if msg_id:
+                tail = "\n".join(detail[-5:]) if detail else "—"
+                await safe_edit(
+                    bot, chat_id, msg_id,
+                    "🔥 ПРОГРЕВ СЕССИЙ\n\n"
+                    f"📊 Прогресс: {i - 1}/{total}\n\n"
+                    f"✅ Успешно: {ok}\n❌ Ошибок: {fail}\n\n"
+                    f"📞 Текущий: {acc.phone}\n\n"
+                    f"Последние:\n{tail}",
+                )
+
             name = acc.name or acc.phone
             icon, txt = "⏳", ""
             c = None
@@ -211,21 +231,6 @@ def register(ctx):
 
             detail.append(f"{icon} {name} ({acc.phone}) — {txt}")
 
-            if msg_id:
-                tail = "\n".join(detail[-5:])
-                next_phone = accounts[i].phone if i < total else None
-                current_line = (
-                    f"📞 Следующий: {next_phone}" if next_phone
-                    else "📞 Следующий: все обработаны"
-                )
-                await safe_edit(
-                    bot, chat_id, msg_id,
-                    "🔥 ПРОГРЕВ СЕССИЙ\n\n"
-                    f"📊 Прогресс: {i}/{total}\n\n"
-                    f"✅ Успешно: {ok}\n❌ Ошибок: {fail}\n\n"
-                    f"{current_line}\n\n"
-                    f"Последние:\n{tail}",
-                )
             await asyncio.sleep(3)
 
         lines = "\n".join(detail)
@@ -261,9 +266,21 @@ def register(ctx):
         """
         Проверяет живость всех аккаунтов.
 
-        Проходит по списку, вызывает is_alive для каждого, обновляет
-        last_checked_at и статус (если мёртв — dead). Показывает
-        прогресс в одном сообщении.
+        Для каждого аккаунта is_alive() возвращает одно из трёх:
+
+          • "alive"   — точно жив (is_user_authorized + get_me прошли);
+          • "dead"    — точно мёртв (AuthKeyUnregistered / UserDeactivatedBan /
+                        UserDeactivated / невалидная сессия);
+          • "unknown" — не смогли проверить (TimeoutError, FloodWaitError,
+                        TypeNotFoundError из-за устаревшего Telethon и т.п.).
+
+        Статус "dead" выставляется ТОЛЬКО при явном "dead". Раньше
+        любой False (включая транзиентный таймаут или FloodWait)
+        превращал живой аккаунт в dead, а следующий тап
+        «🗑️ УДАЛИТЬ МЁРТВЫЕ» безвозвратно сносил его из БД и бэкапа.
+
+        Для "unknown" статус НЕ меняем — только растёт health_fail_count
+        (через db.update_last_checked(alive=False)).
 
         :param chat_id: ID чата для редактирования прогресса.
         :param msg_id: ID сообщения для редактирования.
@@ -271,7 +288,7 @@ def register(ctx):
         :param uid: Telegram ID админа.
         """
         total = len(accounts)
-        ok = dead = 0
+        ok = dead = unknown = 0
 
         for i, acc in enumerate(accounts, 1):
             await safe_edit(
@@ -280,33 +297,52 @@ def register(ctx):
                 "🔍 ПРОВЕРКА АККАУНТОВ\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"📊 Прогресс: {i}/{total}\n\n"
-                f"✅ Живых:   {ok}\n❌ Мёртвых: {dead}\n\n"
+                f"✅ Живых:          {ok}\n"
+                f"❌ Мёртвых:        {dead}\n"
+                f"❔ Не проверилось: {unknown}\n\n"
                 f"📞 Проверяю: {acc.phone}",
                 kbd.back_main(),
             )
 
-            alive, info = await is_alive(acc.session, acc.phone)
-            db.update_last_checked(acc.id, alive=alive)
+            state, info = await is_alive(acc.session, acc.phone)
 
-            if alive:
+            if state == "alive":
                 ok += 1
+                db.update_last_checked(acc.id, alive=True)
                 if acc.status == "dead":
                     db.update_account_status(acc.id, "uncleaned")
-            else:
+            elif state == "dead":
                 dead += 1
                 logger.warning(f"[check_all] {acc.phone}: мёртв — {info}")
+                db.update_last_checked(acc.id, alive=False)
                 db.update_account_status(acc.id, "dead")
                 db.stat_dead(1)
+            else:
+                unknown += 1
+                logger.warning(
+                    f"[check_all] {acc.phone}: не удалось проверить — {info}"
+                )
+                db.update_last_checked(acc.id, alive=False)
 
         text = (
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "📊 ПРОВЕРКА ЗАВЕРШЕНА\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"✅ Живых:   {ok}\n"
-            f"❌ Мёртвых: {dead}\n"
-            f"📱 Всего:   {total}"
+            f"✅ Живых:          {ok}\n"
+            f"❌ Мёртвых:        {dead}\n"
+            f"❔ Не проверилось: {unknown}\n"
+            f"📱 Всего:          {total}"
         )
-        db.log_action(uid, "check", details=f"ok={ok} dead={dead}")
+        if unknown:
+            text += (
+                "\n\n💡 «Не проверилось» — это технические ошибки "
+                "(таймаут / FloodWait / устаревший Telethon).\n"
+                "Их статус НЕ изменён — они остались как были."
+            )
+        db.log_action(
+            uid, "check",
+            details=f"ok={ok} dead={dead} unknown={unknown}",
+        )
         await safe_edit(bot, chat_id, msg_id, text,
                         kbd.after_check(dead > 0))
 
@@ -330,10 +366,6 @@ def register(ctx):
             await edit_or_send(bot, call, "📦 Хранилище пусто.",
                                kbd.back_main())
             return
-        # Явно сбрасываем предыдущую задачу перед запуском новой:
-        # set_running_task ниже тоже сам отменяет старую задачу, но
-        # делаем это заранее, чтобы прогресс-сообщение гарантированно
-        # перезапускалось с чистого состояния.
         old = ctx.running_tasks.get(uid)
         if old is not None and not old.done():
             old.cancel()
@@ -392,9 +424,6 @@ def register(ctx):
             if task and not task.done():
                 task.cancel()
 
-            # Блокируем аккаунт на время обработки, чтобы исключить
-            # гонку с одиночной кнопкой "🧹 ОЧИСТИТЬ СЕССИИ" на карточке
-            # этого же аккаунта, если админ нажмёт её параллельно.
             locked = ctx.try_lock_account(acc.id)
             try:
                 s, msg = await reset_other_sessions(acc.session, acc.phone)
@@ -490,8 +519,6 @@ def register(ctx):
         if not accounts:
             await edit_or_send(bot, call, "✅ Нечего", kbd.back_main())
             return
-        # Сбрасываем предыдущую задачу (если есть завершённая — убираем
-        # запись, если идёт — отменяем), чтобы можно было перезапустить.
         old = ctx.running_tasks.get(uid)
         if old is not None and not old.done():
             old.cancel()
@@ -729,7 +756,7 @@ def register(ctx):
     @admin_required
     async def cb_del_dead(call: types.CallbackQuery):
         """
-        Показывает подтверждение удаления мёртвых аккаунтов.
+        Показывает подтверждение переноса мёртвых аккаунтов в архив.
 
         :param call: callback_query от кнопки "🗑️ УДАЛИТЬ МЁРТВЫЕ".
         """
@@ -752,11 +779,12 @@ def register(ctx):
             "🗑️ УДАЛИТЬ МЁРТВЫЕ\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📱 Найдено мёртвых: {len(dead_accs)}\n\n"
-            "Будут удалены:\n"
+            "Будут перемещены в архив:\n"
             + "\n".join(f"• {a.name or a.phone}" for a in dead_accs[:15])
             + (f"\n… и ещё {len(dead_accs) - 15}"
                if len(dead_accs) > 15 else "")
-            + "\n\n❗ Нельзя отменить."
+            + "\n\n🗄 Аккаунты будут перемещены в «🗄 АРХИВ».\n"
+              "💡 Оттуда их можно восстановить в любой момент."
         )
         await edit_or_send(bot, call, text,
                            kbd.confirm_del_dead(len(dead_accs)))
@@ -765,16 +793,25 @@ def register(ctx):
     @admin_required
     async def cb_del_dead_confirm(call: types.CallbackQuery):
         """
-        Удаляет все dead-аккаунты из БД и бэкапа.
+        Архивирует все dead-аккаунты (мягкое удаление).
 
-        Для каждого отменяет автоочистку, закрывает клиент и удаляет
-        запись через db.delete_account (полное удаление).
+        Раньше здесь стоял db.delete_account() — жёсткое удаление из БД
+        и из accounts_backup.json без возможности восстановления. Если
+        живой аккаунт по любой причине (таймаут, FloodWait, устаревший
+        Telethon) был ошибочно помечен «dead» и попал под эту кнопку —
+        он исчезал навсегда.
+
+        Теперь используется db.archive_account(): строка остаётся в БД
+        с deleted_at, из обычных представлений пропадает, но
+        восстанавливается через «🗄 АРХИВ». Это даёт аварийный канал
+        восстановления на случай именно такого сценария.
 
         :param call: callback_query от кнопки "✅ УДАЛИТЬ N АККАУНТОВ".
         """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
         cnt = 0
+        archived_phones = []
         errors = []
 
         for acc in db.get_accounts():
@@ -784,21 +821,205 @@ def register(ctx):
                     if task and not task.done():
                         task.cancel()
                     await close_client(acc.phone)
-                    db.delete_account(acc.id)
+                    db.archive_account(acc.id)
                     cnt += 1
+                    archived_phones.append(acc.phone)
                 except Exception as e:
                     errors.append(f"{acc.phone}: {e}")
 
-        db.log_action(uid, "del_dead", details=f"count={cnt}")
+        phones_for_log = ",".join(archived_phones[:35])
+        if len(archived_phones) > 35:
+            phones_for_log += f",…(+{len(archived_phones) - 35})"
+        db.log_action(
+            uid, "archive_dead",
+            details=f"count={cnt} phones={phones_for_log}",
+        )
 
         text = (
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🗑️ МЁРТВЫЕ УДАЛЕНЫ\n"
+            "🗄 МЁРТВЫЕ ПЕРЕНЕСЕНЫ В АРХИВ\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"✅ Удалено: {cnt}"
+            f"✅ Заархивировано: {cnt}"
         )
+        if archived_phones:
+            shown = archived_phones[:15]
+            text += "\n\nНомера:\n" + "\n".join(f"• {p}" for p in shown)
+            if len(archived_phones) > 15:
+                text += f"\n… и ещё {len(archived_phones) - 15}"
+        text += "\n\n💡 Восстановить можно через «🗄 АРХИВ»."
         if errors:
             text += "\n\nОшибки:\n" + "\n".join(
                 f"• {e}" for e in errors[:10]
             )
         await edit_or_send(bot, call, text, kbd.back_main())
+
+    async def _render_archive_list(chat_id, page, edit_id=None, call=None):
+        """
+        Рисует страницу списка заархивированных аккаунтов.
+
+        :param chat_id: ID чата.
+        :param page: номер страницы (0-индексация).
+        :param edit_id: ID сообщения для редактирования.
+        :param call: callback_query (если вызвано из кнопки).
+        """
+        accounts = db.get_archived_accounts()
+
+        if not accounts:
+            text = (
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "🗄 АРХИВ\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                "📭 В архиве пусто."
+            )
+            markup = kbd.back_main()
+            if call:
+                await edit_or_send(bot, call, text, markup)
+            else:
+                await safe_edit(bot, chat_id, edit_id, text, markup)
+            return
+
+        total = len(accounts)
+        total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+        page = max(0, min(page, total_pages - 1))
+        slice_ = accounts[page * PAGE_SIZE: page * PAGE_SIZE + PAGE_SIZE]
+
+        text = (
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "🗄 АРХИВ\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📊 Всего: {total}  |  "
+            f"Страница {page + 1} / {total_pages}\n\n"
+            "💡 Заархивированные аккаунты не участвуют в проверках,\n"
+            "очистке и статистике. Их можно восстановить в любой момент.\n\n"
+            "Выберите аккаунт:"
+        )
+        markup = kbd.archive_list_kb(slice_, page, total_pages, PAGE_SIZE)
+        if call:
+            await edit_or_send(bot, call, text, markup)
+        else:
+            await safe_edit(bot, chat_id, edit_id, text, markup)
+
+    @bot.callback_query_handler(func=lambda c: c.data == "archive")
+    @admin_required
+    async def cb_archive(call: types.CallbackQuery):
+        """
+        Открывает список архивных аккаунтов с первой страницы.
+
+        :param call: callback_query от кнопки "🗄 АРХИВ".
+        """
+        await bot.answer_callback_query(call.id)
+        await _render_archive_list(call.message.chat.id, 0, call=call)
+
+    @bot.callback_query_handler(
+        func=lambda c: c.data.startswith("archive_page_")
+    )
+    @admin_required
+    async def cb_archive_page(call: types.CallbackQuery):
+        """
+        Переключает страницу списка архива.
+
+        :param call: callback_query с data="archive_page_N".
+        """
+        await bot.answer_callback_query(call.id)
+        try:
+            page = int(call.data.replace("archive_page_", ""))
+        except ValueError:
+            page = 0
+        await _render_archive_list(call.message.chat.id, page, call=call)
+
+    @bot.callback_query_handler(
+        func=lambda c: c.data.startswith("archive_view_")
+    )
+    @admin_required
+    async def cb_archive_view(call: types.CallbackQuery):
+        """
+        Открывает карточку архивного аккаунта.
+
+        :param call: callback_query с data="archive_view_{id}_{page}".
+        """
+        await bot.answer_callback_query(call.id)
+        try:
+            _, _, acc_id, page = call.data.split("_")
+            acc_id, page = int(acc_id), int(page)
+        except (ValueError, IndexError):
+            return
+
+        acc = db.get_account(acc_id)
+        if not acc:
+            await edit_or_send(bot, call, "❌ Аккаунт не найден",
+                               kbd.back_main())
+            return
+
+        archived_at = (
+            acc.deleted_at.strftime("%d.%m.%Y в %H:%M")
+            if acc.deleted_at else "—"
+        )
+        registered_at = (
+            acc.registered_at.strftime("%d.%m.%Y в %H:%M")
+            if acc.registered_at else "—"
+        )
+
+        text = (
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "🗄 АККАУНТ В АРХИВЕ\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🏷 Название:   {acc.name or acc.phone}\n"
+            f"📞 Номер:      {acc.phone}\n"
+            f"🌍 Страна:     {country_label(acc.phone)}\n"
+            f"📆 Добавлен:   {registered_at}\n"
+            f"🗄 В архиве:   {archived_at}\n"
+            f"📌 Статус:     {status_label(acc.status)}\n\n"
+            "♻️ Нажмите «Восстановить», чтобы вернуть аккаунт\n"
+            "в основное хранилище."
+        )
+        await edit_or_send(bot, call, text, kbd.archive_view_kb(acc_id, page))
+
+    @bot.callback_query_handler(
+        func=lambda c: c.data.startswith("archive_restore_")
+    )
+    @admin_required
+    async def cb_archive_restore(call: types.CallbackQuery):
+        """
+        Восстанавливает аккаунт из архива.
+
+        Снимает deleted_at, возвращает аккаунт в обычные представления
+        и в accounts_backup.json (restore_account вызывает save_backup).
+        Статус НЕ меняется — если аккаунт был «dead», он останется
+        «dead», пока его не перепроверят через «🔍 ПРОВЕРКА АККАУНТОВ»
+        (там сработает авто-возврат в «uncleaned» при успехе).
+
+        :param call: callback_query с data="archive_restore_{id}_{page}".
+        """
+        await bot.answer_callback_query(call.id, "♻️ Восстанавливаю...")
+        uid = call.from_user.id
+        try:
+            _, _, acc_id, page = call.data.split("_")
+            acc_id, page = int(acc_id), int(page)
+        except (ValueError, IndexError):
+            return
+
+        acc = db.get_account(acc_id)
+        if not acc or acc.deleted_at is None:
+            await edit_or_send(bot, call, "❌ Не найден или не в архиве",
+                               kbd.back_main())
+            return
+
+        db.restore_account(acc_id)
+        db.log_action(uid, "restore", details=acc.phone, account_id=acc_id)
+        logger.info(f"[restore] {acc.phone}: восстановлен из архива")
+
+        text = (
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "♻️ АККАУНТ ВОССТАНОВЛЕН\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📞 {acc.phone}\n"
+            f"🏷 {acc.name or acc.phone}\n\n"
+            "📌 Статус сохранён. Если аккаунт был помечен мёртвым,\n"
+            "запустите «🔍 ПРОВЕРКА АККАУНТОВ» — живые аккаунты\n"
+            "автоматически вернутся в работу."
+        )
+        markup = kbd.kb([
+            [kbd.btn("🔙 К АРХИВУ", f"archive_page_{page}")],
+            [kbd.btn("🏠 ГЛАВНОЕ МЕНЮ", "main_menu")],
+        ])
+        await edit_or_send(bot, call, text, markup)

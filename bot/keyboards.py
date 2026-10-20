@@ -37,6 +37,7 @@ def main_menu() -> types.InlineKeyboardMarkup:
         [btn("📊 ОТЧЁТЫ", "reports_menu"), btn("📥 LZT-ЛОГИ", "lzt_logs")],
         [btn("🔍 ПРОВЕРКА АККАУНТОВ", "check_accounts")],
         [btn("🗑️ УДАЛИТЬ МЁРТВЫЕ", "del_dead")],
+        [btn("🗄 АРХИВ", "archive")],
         [btn("🧹 ОЧИСТИТЬ СЕССИИ", "clean_sessions")],
         [btn("➕ ДОБАВИТЬ АККАУНТ", "add_account")],
     ])
@@ -60,11 +61,7 @@ def cancel() -> types.InlineKeyboardMarkup:
     return kb([[btn("🔙 ОТМЕНА", "main_menu")]])
 
 
-# --------------------------------------------------------------------- #
-#             ХРАНИЛИЩЕ: КОРЕНЬ (ИЗБРАННЫЕ + ПАПКИ СТРАН)               #
-# --------------------------------------------------------------------- #
-
-NO_COUNTRY_TOKEN = "ZZ"  # служебный код для группы "без страны" в callback_data
+NO_COUNTRY_TOKEN = "ZZ"
 
 
 def _country_code_to_token(code: str) -> str:
@@ -436,13 +433,13 @@ def confirm_clean() -> types.InlineKeyboardMarkup:
 
 def confirm_del_dead(count: int) -> types.InlineKeyboardMarkup:
     """
-    Клавиатура подтверждения удаления мёртвых аккаунтов.
+    Клавиатура подтверждения переноса мёртвых аккаунтов в архив.
 
-    :param count: сколько мёртвых аккаунтов будет удалено.
+    :param count: сколько мёртвых аккаунтов будет заархивировано.
     :return: InlineKeyboardMarkup.
     """
     return kb([
-        [btn(f"✅ УДАЛИТЬ {count} АККАУНТОВ", "del_dead_confirm")],
+        [btn(f"🗄 В АРХИВ {count}", "del_dead_confirm")],
         [btn("❌ ОТМЕНА", "main_menu")],
     ])
 
@@ -468,6 +465,50 @@ def after_check(has_dead: bool) -> types.InlineKeyboardMarkup:
         rows.append([btn("🗑️ УДАЛИТЬ МЁРТВЫЕ", "del_dead")])
     rows.append([btn("🏠 ГЛАВНОЕ МЕНЮ", "main_menu")])
     return kb(rows)
+
+
+def archive_list_kb(accounts, page: int, total_pages: int,
+                    page_size: int = 5) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура списка заархивированных аккаунтов.
+
+    :param accounts: аккаунты текущей страницы.
+    :param page: номер страницы (0-индексация).
+    :param total_pages: всего страниц.
+    :param page_size: аккаунтов на странице.
+    :return: InlineKeyboardMarkup.
+    """
+    rows = []
+    for acc in accounts:
+        label = acc.name or acc.phone
+        rows.append([
+            btn(f"🗄 {label}", f"archive_view_{acc.id}_{page}")
+        ])
+
+    nav = []
+    if page > 0:
+        nav.append(btn("⬅️", f"archive_page_{page - 1}"))
+    nav.append(btn(f"{page + 1}/{total_pages}", "noop"))
+    if page < total_pages - 1:
+        nav.append(btn("➡️", f"archive_page_{page + 1}"))
+    rows.append(nav)
+    rows.append([btn("🏠 ГЛАВНОЕ МЕНЮ", "main_menu")])
+    return kb(rows)
+
+
+def archive_view_kb(acc_id: int, page: int) -> types.InlineKeyboardMarkup:
+    """
+    Клавиатура карточки архивного аккаунта.
+
+    :param acc_id: ID аккаунта.
+    :param page: страница списка, с которой пришли (для возврата).
+    :return: InlineKeyboardMarkup.
+    """
+    return kb([
+        [btn("♻️ ВОССТАНОВИТЬ", f"archive_restore_{acc_id}_{page}")],
+        [btn("🔙 К АРХИВУ", f"archive_page_{page}")],
+        [btn("🏠 ГЛАВНОЕ МЕНЮ", "main_menu")],
+    ])
 
 
 def buy_menu() -> types.InlineKeyboardMarkup:
