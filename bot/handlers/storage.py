@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 from datetime import datetime
@@ -21,8 +22,10 @@ from ..telethon_ops import (
     read_login_code,
     get_account_info,
     close_client,
+    _get_client,
+    request_email_code,
 )
-from config import AUTO_CLEAN_DELAY
+from config import AUTO_CLEAN_DELAY, LOGIN_EMAIL
 
 logger = logging.getLogger(__name__)
 
@@ -34,16 +37,12 @@ def register(ctx):
     Регистрирует хендлеры хранилища аккаунтов.
 
     Корень хранилища двухуровневый:
-      1. Избранные аккаунты — сверху (несколько штук сразу, с
-         переходом на полный список избранного, если их много).
-      2. "Папки" стран — по одной кнопке на country_code, с числом
-         аккаунтов внутри; открытие папки показывает пагинированный
-         список аккаунтов этой страны (избранные внутри папки тоже
-         идут первыми).
+      1. Избранные аккаунты — сверху.
+      2. "Папки" стран — по одной кнопке на country_code.
 
     Также включает: карточку аккаунта с профилем из Telegram,
-    получение кода входа, переименование, смену статуса, удаление и
-    экспорт CSV.
+    получение кода входа, переименование, смену статуса, привязку
+    email, удаление и экспорт CSV.
 
     :param ctx: объект Context с общим состоянием.
     """
@@ -98,8 +97,7 @@ def register(ctx):
         Рисует страницу "папки" одной страны.
 
         :param chat_id: ID чата.
-        :param code_token: токен страны из callback_data (см.
-            kbd._country_token_to_code).
+        :param code_token: токен страны из callback_data.
         :param page: номер страницы (0-индексация).
         :param edit_id: ID сообщения для редактирования.
         :param call: callback_query (если вызвано из кнопки).
@@ -146,10 +144,6 @@ def register(ctx):
     async def _render_favorites_list(chat_id, page, edit_id=None, call=None):
         """
         Рисует страницу полного списка избранного.
-
-        Используется кнопкой "⭐ ИЗБРАННОЕ" в главном меню и ссылкой
-        "⭐ ВСЕ ИЗБРАННЫЕ (N)" из корня хранилища, когда избранных
-        больше, чем помещается в превью на корневом экране.
 
         :param chat_id: ID чата.
         :param page: номер страницы (0-индексация).
@@ -235,13 +229,6 @@ def register(ctx):
         """
         Универсальная кнопка "Назад" с карточки аккаунта.
 
-        Разбирает токен навигации (origin), с которым была открыта
-        карточка, и возвращает пользователя туда, откуда он пришёл:
-        в корень хранилища, на нужную страницу папки страны или на
-        нужную страницу полного списка избранного. Любой нераспознанный
-        токен (включая старые фиксированные "0" из других модулей
-        бота) трактуется как "вернуться в корень хранилища".
-
         :param call: callback_query с data="storage_back_{origin}".
         """
         await bot.answer_callback_query(call.id)
@@ -307,15 +294,9 @@ def register(ctx):
         """
         Показывает карточку аккаунта с профилем из Telegram.
 
-        Сначала выводит базовую карточку с заглушкой "Загружаю профиль",
-        потом подтягивает данные из Telegram (имя, юзернейм, ID, сессии,
-        чаты) и редактирует сообщение с финальным текстом.
-
         :param call: callback_query.
         :param acc_id: ID аккаунта в БД.
-        :param origin: токен навигации для возврата (см.
-            kbd.account_card) — передаётся насквозь во все действия
-            над этим аккаунтом и в кнопку "Назад".
+        :param origin: токен навигации для возврата.
         """
         acc = db.get_account(acc_id)
         if not acc:
@@ -443,9 +424,6 @@ def register(ctx):
         """
         Читает код входа из переписки аккаунта с Telegram (777000).
 
-        Использует read_login_code. Показывает код и 2FA в
-        моноширинном формате, чтобы их можно было скопировать тапом.
-
         :param call: callback_query от кнопки "🔑 ПОЛУЧИТЬ КОД".
         """
         await bot.answer_callback_query(call.id, "⏳ Читаю...")
@@ -534,9 +512,6 @@ def register(ctx):
         """
         Запускает FSM переименования аккаунта.
 
-        Переводит пользователя в состояние rename_account и просит
-        отправить новое название.
-
         :param call: callback_query от кнопки "🏷 ДАТЬ НАЗВАНИЕ".
         """
         await bot.answer_callback_query(call.id)
@@ -570,6 +545,98 @@ def register(ctx):
         )
         await edit_or_send(bot, call, text, kbd.cancel())
 
+    @bot.callback_query_handler(func=lambda c: c.data.startswith("acc_email_"))
+    @admin_required
+    async def cb_acc_email(call: types.CallbackQuery):
+        """
+        Запускает флоу привязки email к аккаунту из карточки.
+
+        Отправляет код на LOGIN_EMAIL и переводит пользователя в
+        FSM-состояние email_verify.
+
+        :param call: callback_query с data="acc_email_{id}_{origin}".
+        """
+        await bot.answer_callback_query(call.id)
+        try:
+            _, _, acc_id, origin = call.data.split("_")
+            acc_id = int(acc_id)
+        except (ValueError, IndexError):
+            return
+
+        if not LOGIN_EMAIL:
+            await edit_or_send(
+                bot, call,
+                "❌ LOGIN_EMAIL не задан в config.py\n\n"
+                "Добавьте email и перезапустите бота.",
+                kbd.kb([
+                    [kbd.btn("🔙 К АККАУНТУ",
+                             f"acc_view_{acc_id}_{origin}")],
+                ]),
+            )
+            return
+
+        acc = db.get_account(acc_id)
+        if not acc:
+            await edit_or_send(bot, call, "❌ Аккаунт не найден")
+            return
+
+        await edit_or_send(
+            bot, call,
+            "⏳ ПОДКЛЮЧАЮСЬ К АККАУНТУ...\n\n"
+            f"🏷 {acc.name or acc.phone}\n"
+            f"📞 {acc.phone}\n\n"
+            "🔎 Запрашиваю код на email...",
+        )
+
+        try:
+            client = await _get_client(acc.phone, acc.session)
+        except Exception as e:
+            logger.error(f"[email] connect: {type(e).__name__}: {e}")
+            await edit_or_send(
+                bot, call,
+                f"❌ Не удалось подключиться: {e}",
+                kbd.kb([
+                    [kbd.btn("🔙 К АККАУНТУ",
+                             f"acc_view_{acc_id}_{origin}")],
+                ]),
+            )
+            return
+
+        ok, msg, hash_val, length = await request_email_code(
+            client, acc.phone, LOGIN_EMAIL
+        )
+
+        if not ok:
+            await edit_or_send(
+                bot, call,
+                f"❌ Не удалось отправить код: {msg}",
+                kbd.kb([
+                    [kbd.btn("🔄 ПОВТОРИТЬ",
+                             f"acc_email_{acc_id}_{origin}")],
+                    [kbd.btn("🔙 К АККАУНТУ",
+                             f"acc_view_{acc_id}_{origin}")],
+                ]),
+            )
+            return
+
+        ctx.user_state[call.from_user.id] = {
+            "state": "email_verify",
+            "acc_id": acc_id,
+            "origin": origin,
+            "email_hash": hash_val,
+        }
+
+        await edit_or_send(
+            bot, call,
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📧 ПРИВЯЗКА ПОЧТЫ\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📞 Номер: {acc.phone}\n"
+            f"📧 Email: {LOGIN_EMAIL}\n\n"
+            f"Введите {length}-значный код из письма:",
+            kbd.cancel(),
+        )
+
     @bot.callback_query_handler(
         func=lambda c: c.data.startswith("acc_status_set_")
     )
@@ -578,11 +645,7 @@ def register(ctx):
         """
         Устанавливает новый статус аккаунта.
 
-        Если новый статус "cleaned" — отменяет запланированную
-        автоочистку для этого аккаунта.
-
-        :param call: callback_query с
-            data="acc_status_set_{id}_{status}_{origin}".
+        :param call: callback_query с data="acc_status_set_{id}_{status}_{origin}".
         """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
@@ -652,10 +715,6 @@ def register(ctx):
         """
         Удаляет аккаунт из БД и из бэкапа.
 
-        Отменяет автоочистку, закрывает Telethon-клиент, удаляет
-        запись через db.delete_account (полное удаление — из БД и
-        из accounts_backup.json).
-
         :param call: callback_query от кнопки "✅ ДА, УДАЛИТЬ".
         """
         await bot.answer_callback_query(call.id)
@@ -723,9 +782,6 @@ def register(ctx):
     async def cb_acc_export(call: types.CallbackQuery):
         """
         Экспортирует аккаунт в CSV.
-
-        Собирает все поля аккаунта (включая session_string) в файл
-        и отправляет документом в чат.
 
         :param call: callback_query от кнопки "📤 ЭКСПОРТ ЭТОГО АККАУНТА".
         """

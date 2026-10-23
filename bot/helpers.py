@@ -35,9 +35,6 @@ def get_country_code(phone: str) -> str:
     """
     Определяет код страны (RU, US, ...) по номеру телефона.
 
-    Ищет совпадение по phone_code из config.COUNTRIES. Сортирует коды
-    по длине в убывающем порядке, чтобы сначала проверялись длинные.
-
     :param phone: номер телефона.
     :return: код страны (например, "US") или пустая строка.
     """
@@ -68,14 +65,11 @@ def country_label(phone: str) -> str:
 
 def country_label_by_code(code: str) -> str:
     """
-    Возвращает название страны с флагом по её коду (RU, US, ...), а не
-    по номеру телефона. Используется для подписи "папок" стран в
-    хранилище, где известен сохранённый country_code аккаунта.
+    Возвращает название страны с флагом по её коду (RU, US, ...).
 
     :param code: код страны из config.COUNTRIES, или "" для группы
         аккаунтов без определённой страны.
-    :return: строка вида "🇷🇺 Россия" или "🌍 Без страны" (если код
-        пуст), либо "🌍 {code}" если код не найден в справочнике.
+    :return: строка вида "🇷🇺 Россия" или "🌍 Без страны".
     """
     if not code:
         return "🌍 Без страны"
@@ -162,35 +156,97 @@ def lzt_error_hint(status: str) -> str:
     Возвращает подсказку по ошибке LZT-входа.
 
     Расшифровывает технический статус в человеческое объяснение и
-    совет, что делать.
+    совет, что делать. Учитывает как «смысловые» статусы (needs_2fa,
+    phone_banned), так и технические (timeout, error:*).
 
     :param status: технический код ошибки.
     :return: строка-подсказка.
     """
     hints = {
-        "no_code_from_market": "LZT не отдал код за 2 минуты.\n💡 Подожди 5–10 минут и повтори.",
-        "invalid_code": "Код пришёл, но Telegram его не принял.\n💡 Повтори вход.",
-        "needs_2fa": "Нужен 2FA, но его нет в карточке лота.\n💡 Проверь данные лота.",
-        "bad_2fa_password": "Пароль 2FA не подошёл.\n💡 Проверь telegram_password на LZT.",
-        "send_unavailable": "Telegram не даёт запросить код.\n💡 Подожди 1–2 минуты.",
-        "phone_banned": "Номер забанен Telegram — восстановить нельзя.",
-        "phone_invalid": "Неверный формат номера. Обратись в LZT.",
-        "phone_flood": "Слишком частые запросы. Подожди.",
-        "timeout": "Таймаут соединения. Попробуй ещё раз.",
+        "no_code_from_market": (
+            "LZT не отдал код за отведённое время.\n"
+            "💡 Подожди 5–10 минут и повтори вход через LZT-ЛОГИ."
+        ),
+        "invalid_code": (
+            "Код пришёл, но Telegram его не принял.\n"
+            "💡 Повтори вход — LZT пришлёт новый код."
+        ),
+        "needs_2fa": (
+            "Нужен 2FA, но его нет в карточке лота.\n"
+            "💡 Проверь данные лота на LZT."
+        ),
+        "bad_2fa_password": (
+            "Пароль 2FA не подошёл.\n"
+            "💡 Проверь telegram_password в данных лота."
+        ),
+        "send_unavailable": (
+            "Telegram не даёт запросить код.\n"
+            "💡 Подожди 1–2 минуты и повтори."
+        ),
+        "phone_banned": (
+            "Номер забанен Telegram — восстановить нельзя."
+        ),
+        "phone_invalid": (
+            "Неверный формат номера. Обратись в поддержку LZT."
+        ),
+        "phone_flood": (
+            "Слишком частые запросы на номер.\n"
+            "💡 Подожди 10–15 минут."
+        ),
+        "timeout": (
+            "Сервер не ответил за 15–20 секунд.\n"
+            "💡 Проверь соединение и повтори. "
+            "Покупка не отменена — лот уже твой, вход можно повторить."
+        ),
+        "cancelled": (
+            "Операция отменена пользователем."
+        ),
+        "error:session_save": (
+            "Telegram не дал сохранить сессию.\n"
+            "💡 Повтори вход — если не помогает, обратись в поддержку."
+        ),
+        "error:empty_session": (
+            "Сессия получилась пустой.\n"
+            "💡 Повтори вход."
+        ),
+        "error:connect_TimeoutError": (
+            "Telegram DC не отвечает.\n"
+            "💡 Проверь соединение / прокси, затем повтори вход."
+        ),
+        "error:connect_ConnectionError": (
+            "Не удалось установить соединение с Telegram.\n"
+            "💡 Проверь сеть / прокси."
+        ),
     }
+
     if status.startswith("flood_"):
-        return "FloodWait — подожди и попробуй позже."
+        return (
+            "FloodWait — Telegram временно заблокировал запросы.\n"
+            f"💡 Подожди {status[6:]} секунд и повтори."
+        )
+
+    if status.startswith("error:connect_"):
+        exc_name = status[len("error:connect_"):]
+        return (
+            f"Ошибка подключения к Telegram: {exc_name}.\n"
+            "💡 Проверь сеть / прокси и повтори."
+        )
+
     if status.startswith("error:"):
-        return f"Техническая ошибка: {status[6:]}"
-    return hints.get(status, "Неизвестная причина. Смотри логи.")
+        return (
+            f"Техническая ошибка: {status[6:]}.\n"
+            "💡 Повтори вход через LZT-ЛОГИ."
+        )
+
+    return hints.get(
+        status,
+        "Неизвестная причина. Проверь логи бота."
+    )
 
 
 def md_escape(text: str) -> str:
     """
     Экранирует спецсимволы Markdown V1 для Telegram.
-
-    В Markdown V1 символы _, *, `, [ нужно экранировать, иначе
-    Telegram вернёт ошибку парсинга.
 
     :param text: текст для экранирования.
     :return: безопасный текст.
@@ -207,9 +263,6 @@ async def edit_or_send(bot, call, text, markup=None, parse_mode=None):
     Редактирует сообщение или отправляет новое, если редактирование
     невозможно.
 
-    Полезно для callback-хендлеров, когда нужно обновить текущее
-    сообщение, но оно может быть уже удалено или недоступно.
-
     :param bot: экземпляр AsyncTeleBot.
     :param call: callback_query от пользователя.
     :param text: текст сообщения.
@@ -225,6 +278,8 @@ async def edit_or_send(bot, call, text, markup=None, parse_mode=None):
             reply_markup=markup,
         )
     except Exception as e:
+        if "not modified" in str(e).lower():
+            return
         logger.warning(f"[edit_or_send] edit failed: {type(e).__name__}: {e}")
         try:
             await bot.send_message(
@@ -234,7 +289,9 @@ async def edit_or_send(bot, call, text, markup=None, parse_mode=None):
                 reply_markup=markup,
             )
         except Exception as e2:
-            logger.error(f"[edit_or_send] send failed: {type(e2).__name__}: {e2}")
+            logger.error(
+                f"[edit_or_send] send failed: {type(e2).__name__}: {e2}"
+            )
 
 
 async def safe_edit(bot, chat_id, msg_id, text, markup=None, parse_mode=None):
@@ -289,9 +346,6 @@ def build_accounts_csv(accounts) -> bytes:
     """
     Собирает CSV со всеми аккаунтами.
 
-    Формат: UTF-8 с BOM, разделитель ";". Открывается в Excel,
-    LibreOffice и на телефонах без настроек.
-
     :param accounts: список объектов Account.
     :return: bytes готового CSV-файла.
     """
@@ -325,9 +379,6 @@ def build_accounts_csv(accounts) -> bytes:
 def build_single_account_csv(acc) -> bytes:
     """
     Собирает CSV с одним аккаунтом.
-
-    Все поля идут по строкам (поле;значение). В конце — session_string
-    в открытом виде, чтобы можно было восстановить аккаунт вручную.
 
     :param acc: объект Account.
     :return: bytes готового CSV-файла.

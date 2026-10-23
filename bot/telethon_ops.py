@@ -3,7 +3,7 @@ import logging
 import re
 import traceback
 
-from telethon import TelegramClient, errors, functions
+from telethon import TelegramClient, errors, functions, types
 from telethon.sessions import StringSession
 from telethon.tl.functions.auth import ResetAuthorizationsRequest
 from telethon.tl.functions.channels import LeaveChannelRequest
@@ -84,10 +84,6 @@ async def _get_client(phone: str, session_string: str) -> TelegramClient:
     Кэширует клиенты по номеру телефона. Если в кэше есть клиент, но
     он отключён, создаёт новый.
 
-    Если connect() падает — созданный клиент немедленно закрывается и
-    удаляется из _all_clients, чтобы не копить «висящие» TCP-соединения
-    и «грязные» клиенты в глобальном реестре.
-
     :param phone: номер телефона (ключ кэша).
     :param session_string: строка сессии.
     :return: подключённый TelegramClient.
@@ -135,9 +131,6 @@ async def _close_on_error(phone: str) -> None:
     """
     Закрывает клиент, чтобы следующий вызов пересоздал его с нуля.
 
-    Используется после технических ошибок, чтобы не переиспользовать
-    «грязное» соединение/состояние клиента.
-
     :param phone: номер телефона.
     """
     try:
@@ -151,19 +144,8 @@ async def _classify_call(coro_factory, phone: str, phase: str):
     Выполняет корутину, ловит ошибки Telethon и превращает их в
     (state, info)-пару.
 
-    Возвращает (result, None) при успехе или (None, (state, info))
-    при ошибке. state ∈ {"dead", "unknown"}:
-
-      • "dead"    — Telegram однозначно сообщает, что аккаунт мёртв
-                    (аннулирован ключ, забанен, деактивирован);
-      • "unknown" — проверить не удалось (FloodWait, таймаут, любая
-                    техническая ошибка, включая TypeNotFoundError из-за
-                    устаревшего Telethon).
-
-    :param coro_factory: функция без аргументов, возвращающая корутину.
-    :param phone: номер телефона (для логов).
-    :param phase: метка фазы для логов («auth», «get_me», …).
-    :return: (result, None) или (None, (state, info)).
+    :return: (result, None) или (None, (state, info)),
+        где state ∈ {"dead", "unknown"}.
     """
     try:
         return await coro_factory(), None
@@ -187,16 +169,7 @@ async def is_alive(session_string: str, phone: str):
     """
     Проверяет, жива ли сессия аккаунта.
 
-    Возвращает три состояния, чтобы отличить «точно мёртв» от
-    «не смогли проверить по технической причине»:
-
-        ("alive", имя)       — сессия рабочая;
-        ("dead", причина)    — точно мёртв (бан / деактивация /
-                               аннулированный ключ / невалидная сессия);
-        ("unknown", причина) — проверить не удалось (таймаут, FloodWait,
-                               TypeNotFoundError из-за устаревшего
-                               Telethon и т.п.). Статус аккаунта
-                               менять НЕЛЬЗЯ.
+    Возвращает три состояния: alive / dead / unknown.
 
     :param session_string: строка сессии.
     :param phone: номер телефона.
@@ -220,7 +193,6 @@ async def is_alive(session_string: str, phone: str):
     except Exception as e:
         logger.error(f"[is_alive.connect] {phone}: "
                      f"{type(e).__name__}: {e}")
-        logger.debug(traceback.format_exc())
         return "unknown", f"Ошибка подключения: {str(e)[:120]}"
 
     authorized, err = await _classify_call(
@@ -252,9 +224,6 @@ async def read_login_code(session_string: str, phone: str):
     """
     Читает код входа из сервисного чата Telegram (777000).
 
-    Подключается по сессии, читает последние 15 сообщений от сервисного
-    аккаунта и ищет 5-значный код.
-
     :param session_string: строка сессии.
     :param phone: номер телефона.
     :return: (str, str) — (код, "OK") при успехе; (None, причина) при ошибке.
@@ -284,9 +253,6 @@ async def read_login_code(session_string: str, phone: str):
 async def get_account_info(session_string: str, phone: str) -> dict:
     """
     Получает расширенную информацию об аккаунте.
-
-    Подключается по сессии и собирает: профиль (имя, юзернейм, ID),
-    количество активных сессий, количество диалогов (чаты/каналы/группы).
 
     :param session_string: строка сессии.
     :param phone: номер телефона.
@@ -375,17 +341,9 @@ async def clear_all_dialogs(client: TelegramClient, phone: str):
     """
     Полностью очищает диалоги аккаунта: каналы, группы, личные чаты.
 
-    Проходит по всем диалогам и:
-    - выходит из каналов (LeaveChannelRequest),
-    - удаляет себя из групп (DeleteChatUserRequest),
-    - удаляет историю личных чатов (DeleteHistoryRequest),
-    - удаляет сам диалог (delete_dialog).
-
-    Между операциями делает паузу 0.4 сек, чтобы не ловить FloodWait.
-
     :param client: подключённый TelegramClient.
     :param phone: номер телефона (для логов).
-    :return: (deleted, failed, total) — сколько обработано, ошибок, всего.
+    :return: (deleted, failed, total).
     """
     try:
         dialogs = await client.get_dialogs(limit=None)
@@ -495,14 +453,9 @@ async def reset_other_sessions(session_string: str, phone: str):
     """
     Завершает все чужие сессии аккаунта и очищает диалоги.
 
-    Выполняет ResetAuthorizationsRequest (закрывает все остальные сессии)
-    и следом очищает все диалоги через clear_all_dialogs.
-
     :param session_string: строка сессии.
     :param phone: номер телефона.
-    :return: (bool, str) — (True, "OK ...") при успехе;
-        (False, причина) при ошибке. Особая причина "FROZEN" — аккаунт
-        заморожен Telegram.
+    :return: (bool, str).
     """
     if not session_string:
         return False, "Нет session"
@@ -556,8 +509,7 @@ async def clear_dialogs_only(session_string: str, phone: str):
 
     :param session_string: строка сессии.
     :param phone: номер телефона.
-    :return: (bool, str, int, int, int) — (успех, сообщение, удалено,
-        ошибок, всего).
+    :return: (bool, str, int, int, int).
     """
     if not session_string:
         return False, "Нет session", 0, 0, 0
@@ -591,13 +543,8 @@ async def start_login(phone: str):
     """
     Отправляет код подтверждения на указанный номер.
 
-    Создаёт новый клиент, подключается и вызывает send_code_request.
-    Возвращает клиент для дальнейшего ввода кода.
-
     :param phone: номер телефона.
-    :return: (client, phone_code_hash, status):
-        - (TelegramClient, hash, "OK") при успехе.
-        - (None, None, "причина") при ошибке.
+    :return: (client, phone_code_hash, status).
     """
     phone = fmt_phone(phone)
     client = make_client()
@@ -629,12 +576,7 @@ async def confirm_code(client, phone, phone_code_hash, code):
     """
     Подтверждает вход кодом из Telegram.
 
-    :param client: активный TelegramClient из start_login.
-    :param phone: номер телефона.
-    :param phone_code_hash: хэш кода из start_login.
-    :param code: код подтверждения из Telegram.
     :return: (bool, str, str) — (успех, сообщение, session_string).
-        Если нужен 2FA, возвращает (False, "NEED_2FA", None).
     """
     try:
         await asyncio.wait_for(
@@ -657,9 +599,7 @@ async def confirm_2fa(client, password):
     """
     Подтверждает вход паролем 2FA.
 
-    :param client: активный TelegramClient.
-    :param password: пароль 2FA.
-    :return: (bool, str, str) — (успех, сообщение, session_string).
+    :return: (bool, str, str).
     """
     try:
         await asyncio.wait_for(client.sign_in(password=password), timeout=15)
@@ -676,13 +616,7 @@ async def set_2fa_password(client, new_password: str,
     """
     Устанавливает или меняет пароль 2FA.
 
-    Если current_password передан — меняет существующий пароль.
-    Если нет — устанавливает новый (для аккаунта без 2FA).
-
-    :param client: активный TelegramClient.
-    :param new_password: новый пароль 2FA.
-    :param current_password: текущий пароль 2FA (если уже установлен).
-    :return: (bool, str) — (успех, сообщение).
+    :return: (bool, str).
     """
     try:
         if current_password:
@@ -700,10 +634,108 @@ async def set_2fa_password(client, new_password: str,
                 timeout=30,
             )
         return True, "OK"
-    except errors.PasswordMustAttemptError as e:
+    except errors.PasswordMustAttemptError:
         return False, "Неверный пароль. Повторите ввод текущего пароля 2FA"
     except errors.PasswordHashInvalidError:
         return False, "Неверный текущий пароль 2FA"
     except Exception as e:
         logger.error(f"[set_2fa]: {type(e).__name__}: {e}")
         return False, f"{type(e).__name__}: {str(e)[:150]}"
+
+
+async def request_email_code(client, phone: str, email: str):
+    """
+    Отправляет код подтверждения на email для привязки почты к аккаунту.
+
+    Сначала запрашивает новый phone_code_hash через SendCodeRequest,
+    затем вызывает SendVerifyEmailCodeRequest с purpose=LoginSetup.
+
+    :param client: активный TelegramClient.
+    :param phone: номер телефона (в формате +XXXXXXXXXXX).
+    :param email: email для привязки.
+    :return: (ok, msg, phone_code_hash, length):
+        - ok=True, msg="OK", phone_code_hash=str, length=int при успехе.
+        - ok=False, msg=причина, phone_code_hash=None, length=0 при ошибке.
+    """
+    phone = fmt_phone(phone)
+    try:
+        sent_code = await asyncio.wait_for(
+            client(functions.auth.SendCodeRequest(
+                phone_number=phone,
+                api_id=API_ID,
+                api_hash=API_HASH,
+                settings=types.CodeSettings(),
+            )),
+            timeout=20,
+        )
+        phone_code_hash = sent_code.phone_code_hash
+
+        result = await asyncio.wait_for(
+            client(functions.account.SendVerifyEmailCodeRequest(
+                purpose=types.EmailVerifyPurposeLoginSetup(
+                    phone_number=phone,
+                    phone_code_hash=phone_code_hash,
+                ),
+                email=email,
+            )),
+            timeout=20,
+        )
+        return True, "OK", phone_code_hash, result.length
+
+    except errors.EmailInvalidError:
+        return False, f"Некорректный email: {email}", None, 0
+    except errors.EmailNotAllowedError:
+        return False, f"Email {email} нельзя использовать (занят)", None, 0
+    except errors.FloodWaitError as e:
+        return False, f"FloodWait: {e.seconds} сек.", None, 0
+    except errors.AuthKeyUnregisteredError:
+        return False, "Ключ аннулирован", None, 0
+    except errors.UserDeactivatedBanError:
+        return False, "Аккаунт забанен", None, 0
+    except asyncio.TimeoutError:
+        return False, "Таймаут при отправке кода на email", None, 0
+    except Exception as e:
+        logger.error(f"[request_email] {phone}: {type(e).__name__}: {e}")
+        return False, f"{type(e).__name__}: {str(e)[:150]}", None, 0
+
+
+async def confirm_email_code(client, phone: str, phone_code_hash: str,
+                             code: str):
+    """
+    Подтверждает код из письма и привязывает email к аккаунту.
+
+    :param client: активный TelegramClient.
+    :param phone: номер телефона.
+    :param phone_code_hash: хэш из request_email_code.
+    :param code: код из письма.
+    :return: (ok, msg, email):
+        - ok=True, msg="OK", email=привязанный email при успехе.
+        - ok=False, msg=причина, email=None при ошибке.
+    """
+    phone = fmt_phone(phone)
+    try:
+        result = await asyncio.wait_for(
+            client(functions.account.VerifyEmailRequest(
+                purpose=types.EmailVerifyPurposeLoginSetup(
+                    phone_number=phone,
+                    phone_code_hash=phone_code_hash,
+                ),
+                verification=types.EmailVerificationCode(code=code),
+            )),
+            timeout=20,
+        )
+        if isinstance(result, types.account.EmailVerifiedLogin):
+            return True, "OK", result.email
+        return True, "OK", None
+
+    except errors.EmailCodeInvalidError:
+        return False, "Неверный код из email", None
+    except errors.EmailCodeExpiredError:
+        return False, "Код из email истёк", None
+    except errors.FloodWaitError as e:
+        return False, f"FloodWait: {e.seconds} сек.", None
+    except asyncio.TimeoutError:
+        return False, "Таймаут при подтверждении email", None
+    except Exception as e:
+        logger.error(f"[confirm_email] {phone}: {type(e).__name__}: {e}")
+        return False, f"{type(e).__name__}: {str(e)[:150]}", None

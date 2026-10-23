@@ -33,9 +33,6 @@ def fmt_phone(phone: str) -> str:
     """
     Приводит номер телефона к формату +XXXXXXXXXXX.
 
-    Удаляет пробелы, скобки, дефисы, точки. Оставляет только цифры
-    и ведущий плюс.
-
     :param phone: номер в любом формате.
     :return: нормализованный номер или исходное значение, если пусто.
     """
@@ -55,9 +52,6 @@ def make_market():
     """
     Создаёт клиент LZT Market для запросов к API.
 
-    Проверяет наличие библиотеки LOLZTEAM и токена. Если задан
-    LZT_PROXY — устанавливает прокси в настройках.
-
     :raises RuntimeError: если LOLZTEAM не установлен или токен пуст.
     :return: экземпляр Market.
     """
@@ -75,14 +69,14 @@ async def get_balance(market) -> Tuple[Optional[float], Optional[int]]:
     """
     Получает баланс аккаунта LZT.
 
-    Суммирует все валютные балансы из ответа /balance/exchange.
-    Запоминает balance_id рублёвого счёта для последующих операций.
-
     :param market: экземпляр Market.
     :return: (сумма_баланса, balance_id) или (None, None) при ошибке.
     """
     try:
-        resp = await market.request("GET", "/balance/exchange")
+        resp = await asyncio.wait_for(
+            market.request("GET", "/balance/exchange"),
+            timeout=15,
+        )
         data = resp.json()
         total, balance_id, found = 0.0, None, False
         for val in (data.get("to") or {}).values():
@@ -95,6 +89,9 @@ async def get_balance(market) -> Tuple[Optional[float], Optional[int]]:
                 except (ValueError, TypeError):
                     pass
         return (total if found else None), balance_id
+    except asyncio.TimeoutError:
+        logger.warning("[lzt.get_balance] timeout")
+        return None, None
     except Exception as e:
         logger.warning(f"[lzt.get_balance] {e}")
         return None, None
@@ -114,9 +111,8 @@ async def fetch_code(market, item_id: int, attempts: int = 1) -> Optional[str]:
     """
     Опрашивает LZT Market на код подтверждения для лота.
 
-    Рекурсивно обходит JSON-ответ и ищет код по ключам code, email_code,
-    sms_code, otp, telegram_code, login_code. Если код в текстовых
-    полях — ищет 5-значное число.
+    Каждый запрос ограничен таймаутом 10 секунд. При таймауте попытка
+    пропускается, а не висит бесконечно.
 
     :param market: экземпляр Market.
     :param item_id: ID лота LZT.
@@ -141,7 +137,12 @@ async def fetch_code(market, item_id: int, attempts: int = 1) -> Optional[str]:
 
     for i in range(attempts):
         try:
-            resp = await market.request("GET", f"/{item_id}/telegram-login-code")
+            resp = await asyncio.wait_for(
+                market.request(
+                    "GET", f"/{item_id}/telegram-login-code"
+                ),
+                timeout=10,
+            )
             if resp.status_code == 200:
                 pairs = list(walk(resp.json()))
                 for k, v in pairs:
@@ -159,6 +160,9 @@ async def fetch_code(market, item_id: int, attempts: int = 1) -> Optional[str]:
                 logger.warning("[lzt.fetch_code] 429 — too many requests")
             elif resp.status_code == 404:
                 logger.warning(f"[lzt.fetch_code] 404 — лот {item_id} не найден")
+        except asyncio.TimeoutError:
+            logger.warning(f"[lzt.fetch_code] timeout for item {item_id} "
+                           f"(attempt {i + 1}/{attempts})")
         except Exception as e:
             logger.error(f"[lzt.fetch_code] {type(e).__name__}: {e}")
         if i < attempts - 1:
@@ -169,8 +173,6 @@ async def fetch_code(market, item_id: int, attempts: int = 1) -> Optional[str]:
 def extract_phone(text: str) -> Optional[str]:
     """
     Извлекает номер телефона из произвольного текста.
-
-    Ищет сначала последовательность с плюсом, потом 10–15 цифр.
 
     :param text: текст для поиска.
     :return: номер в формате +XXXXXXXXXXX или None.
@@ -191,10 +193,6 @@ def extract_phone(text: str) -> Optional[str]:
 def extract_login_data(data) -> dict:
     """
     Рекурсивно извлекает login-данные из ответа LZT.
-
-    Обходит вложенные словари и списки, собирает все пары ключ-значение
-    в плоский словарь. Если попадается JSON-строка (loginData, json,
-    data) — распарсивает её и тоже добавляет.
 
     :param data: JSON-ответ от LZT.
     :return: плоский словарь со всеми полями.
@@ -235,9 +233,8 @@ async def buy_one(market, max_price: float, balance_id=None, balance=None,
     """
     Ищет и покупает один самый дешёвый лот.
 
-    Перебирает страницы выдачи /telegram (до 10), фильтрует по цене
-    и стране, покупает через fast-buy. Если баланс меньше цены —
-    возвращает no_money. Если лоты закончились — no_lots.
+    Запрос fast-buy ограничен таймаутом 20 секунд. При таймауте лот
+    пропускается и пробуется следующий.
 
     :param market: экземпляр Market.
     :param max_price: максимальная цена в рублях.
@@ -257,8 +254,14 @@ async def buy_one(market, max_price: float, balance_id=None, balance=None,
         if SPAM_FILTER:
             query += f"&spam={SPAM_FILTER}"
         try:
-            resp = await market.request("GET", query)
+            resp = await asyncio.wait_for(
+                market.request("GET", query),
+                timeout=15,
+            )
             data = resp.json()
+        except asyncio.TimeoutError:
+            logger.error(f"[lzt.search] page {page}: timeout")
+            continue
         except Exception as e:
             logger.error(f"[lzt.search] page {page}: {e}")
             continue
@@ -293,8 +296,12 @@ async def buy_one(market, max_price: float, balance_id=None, balance=None,
                 payload["balance_id"] = balance_id
 
             try:
-                buy_resp = await market.request(
-                    "POST", f"/{item_id}/fast-buy", json=payload)
+                buy_resp = await asyncio.wait_for(
+                    market.request(
+                        "POST", f"/{item_id}/fast-buy", json=payload
+                    ),
+                    timeout=20,
+                )
                 buy_data = {}
                 try:
                     buy_data = buy_resp.json()
@@ -331,6 +338,10 @@ async def buy_one(market, max_price: float, balance_id=None, balance=None,
                     continue
                 skip_ids.add(item_id)
                 continue
+            except asyncio.TimeoutError:
+                logger.warning(f"[lzt.buy] {item_id}: fast-buy timeout")
+                skip_ids.add(item_id)
+                continue
             except Exception as e:
                 logger.error(f"[lzt.buy] {item_id}: {type(e).__name__}: {e}")
                 skip_ids.add(item_id)
@@ -348,8 +359,14 @@ async def get_item_login_data(market, item_id: int) -> dict:
     :return: плоский словарь с данными или пустой словарь.
     """
     try:
-        resp = await market.request("GET", f"/{item_id}")
+        resp = await asyncio.wait_for(
+            market.request("GET", f"/{item_id}"),
+            timeout=15,
+        )
         return extract_login_data(resp.json())
+    except asyncio.TimeoutError:
+        logger.warning(f"[lzt.item] {item_id}: timeout")
+        return {}
     except Exception as e:
         logger.warning(f"[lzt.item] {item_id}: {e}")
         return {}
@@ -359,17 +376,20 @@ async def list_purchases(market) -> list:
     """
     Возвращает список всех купленных лотов (все страницы).
 
-    Проходит страницы /user/items до 20-й, собирает все items в
-    один список.
-
     :param market: экземпляр Market.
     :return: список словарей-лотов.
     """
     result = []
     for page in range(1, 21):
         try:
-            resp = await market.request("GET", f"/user/items?page={page}")
+            resp = await asyncio.wait_for(
+                market.request("GET", f"/user/items?page={page}"),
+                timeout=15,
+            )
             data = resp.json()
+        except asyncio.TimeoutError:
+            logger.error(f"[lzt.purchases] page {page}: timeout")
+            break
         except Exception as e:
             logger.error(f"[lzt.purchases] page {page}: {e}")
             break
@@ -406,11 +426,8 @@ async def set_random_avatar(client) -> Tuple[bool, str]:
     """
     Устанавливает случайную аватарку из папки avatars/.
 
-    Берёт случайный .jpg/.jpeg/.png из AVATAR_DIR и загружает его
-    в профиль через UploadProfilePhotoRequest.
-
     :param client: активный TelegramClient.
-    :return: (успех, информация) — (True, путь) или (False, причина).
+    :return: (успех, информация).
     """
     if not os.path.isdir(AVATAR_DIR):
         return False, "no_dir"
@@ -431,7 +448,8 @@ async def set_random_avatar(client) -> Tuple[bool, str]:
 
 
 async def login_to_account(phone: str, item_id: int, market,
-                           password: Optional[str] = None):
+                           password: Optional[str] = None,
+                           ctx_cancel=None):
     """
     Заходит на купленный аккаунт по номеру телефона.
 
@@ -440,8 +458,16 @@ async def login_to_account(phone: str, item_id: int, market,
     повторно берёт свежий из лота. После входа устанавливает
     случайную аватарку.
 
+    Каждый запрос кода ограничен таймаутом 15 секунд — если LZT
+    тормозит, попытка пропускается.
+
+    Если передан ctx_cancel (callable без аргументов, возвращающий
+    bool) — проверяется перед каждым шагом. Если вернёт True,
+    функция сразу выходит со статусом "cancelled".
+
     Возможные статусы:
       - ("1BVts...", "ok") — успех
+      - (None, "cancelled") — отменено пользователем
       - (None, "needs_2fa") — нужен 2FA-пароль
       - (None, "no_code_from_market") — LZT не отдал код
       - (None, "invalid_code") — код не подошёл
@@ -457,6 +483,7 @@ async def login_to_account(phone: str, item_id: int, market,
     :param item_id: ID лота LZT.
     :param market: экземпляр Market.
     :param password: пароль 2FA (если известен).
+    :param ctx_cancel: callable, возвращающий True для отмены.
     :return: (session_string, status).
     """
     phone = fmt_phone(phone)
@@ -472,7 +499,16 @@ async def login_to_account(phone: str, item_id: int, market,
     tried = set()
     signed = False
 
+    def _is_cancelled():
+        try:
+            return bool(ctx_cancel and ctx_cancel())
+        except Exception:
+            return False
+
     try:
+        if _is_cancelled():
+            return None, "cancelled"
+
         try:
             sent = await asyncio.wait_for(
                 client.send_code_request(phone), timeout=15)
@@ -498,6 +534,9 @@ async def login_to_account(phone: str, item_id: int, market,
             return None, "timeout"
 
         for round_no in range(CODE_ROUNDS):
+            if _is_cancelled():
+                return None, "cancelled"
+
             if round_no > 0:
                 logger.info(f"[lzt.login] {phone}: повторный запрос кода "
                             f"({round_no + 1}/{CODE_ROUNDS})")
@@ -524,8 +563,23 @@ async def login_to_account(phone: str, item_id: int, market,
                         f"({type(e).__name__}), использую прежний hash")
 
             for attempt in range(CODE_ATTEMPTS):
+                if _is_cancelled():
+                    return None, "cancelled"
+
                 await asyncio.sleep(CODE_DELAY)
-                code = await fetch_code(market, item_id)
+
+                try:
+                    code = await asyncio.wait_for(
+                        fetch_code(market, item_id),
+                        timeout=15,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"[lzt.login] {phone}: fetch_code timeout "
+                        f"(попытка {attempt + 1}/{CODE_ATTEMPTS})"
+                    )
+                    continue
+
                 if not code:
                     continue
                 if code in tried:
@@ -597,6 +651,8 @@ async def login_to_account(phone: str, item_id: int, market,
                 break
 
         if not signed:
+            if _is_cancelled():
+                return None, "cancelled"
             status = "invalid_code" if tried else "no_code_from_market"
             logger.warning(f"[lzt.login] {phone}: не удалось войти — {status}")
             return None, status
@@ -638,3 +694,64 @@ async def login_to_account(phone: str, item_id: int, market,
         return None, f"error:{type(e).__name__}"
     finally:
         await _safe_disconnect(client)
+
+
+async def retry_login_to_account(phone: str, item_id: int, market,
+                                 password: Optional[str] = None,
+                                 ctx_cancel=None,
+                                 max_attempts: int = 2):
+    """
+    Обёртка над login_to_account с автоматическим повтором.
+
+    Если первая попытка вернула "timeout", "no_code_from_market"
+    или "invalid_code" — пробует ещё раз (до max_attempts раз).
+    Между попытками пауза 5 секунд, чтобы LZT успел прислать код.
+
+    Для невосстановимых статусов (needs_2fa, bad_2fa_password,
+    phone_banned и т.п.) повтор не делается — сразу возврат.
+
+    Если все попытки провалились — возвращает последний статус.
+
+    :param phone: номер телефона.
+    :param item_id: ID лота LZT.
+    :param market: экземпляр Market.
+    :param password: пароль 2FA (если известен).
+    :param ctx_cancel: callable, возвращающий True для отмены.
+    :param max_attempts: сколько всего попыток (включая первую).
+    :return: (session_string, status).
+    """
+    retryable = {"timeout", "no_code_from_market", "invalid_code"}
+    last_status = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if ctx_cancel and ctx_cancel():
+                return None, "cancelled"
+        except Exception:
+            pass
+
+        if attempt > 1:
+            logger.info(
+                f"[lzt.retry] {phone}: повторная попытка "
+                f"{attempt}/{max_attempts} (item={item_id})"
+            )
+            await asyncio.sleep(5)
+
+        session_str, status = await login_to_account(
+            phone, item_id, market,
+            password=password,
+            ctx_cancel=ctx_cancel,
+        )
+
+        if session_str:
+            return session_str, "ok"
+
+        if status == "cancelled":
+            return None, "cancelled"
+
+        last_status = status
+
+        if status not in retryable:
+            return None, status
+
+    return None, last_status or "timeout"

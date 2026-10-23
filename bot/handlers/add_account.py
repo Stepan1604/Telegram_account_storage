@@ -17,9 +17,12 @@ from ..telethon_ops import (
     confirm_code,
     confirm_2fa,
     set_2fa_password,
+    request_email_code,
+    confirm_email_code,
     _safe_disconnect,
+    _get_client,
 )
-from config import PASSWORD_2FA
+from config import PASSWORD_2FA, LOGIN_EMAIL
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +31,11 @@ def register(ctx):
     """
     Регистрирует хендлеры добавления и переименования аккаунтов.
 
-    Флоу добавления состоит из 4 шагов: имя → номер → код → 2FA.
+    Флоу добавления состоит из 4–5 шагов: имя → номер → код → [2FA] → [email].
+    Шаг email выполняется только если в config.py задан LOGIN_EMAIL.
     В конце вызывается _finalize_add, который сохраняет аккаунт в БД
-    и планирует автоочистку. Также сюда входит FSM переименования
-    и общий text_router для текстовых сообщений.
+    и планирует автоочистку. Также сюда входит FSM переименования,
+    FSM привязки email из карточки аккаунта и общий text_router.
 
     :param ctx: объект Context с общим состоянием.
     """
@@ -42,10 +46,6 @@ def register(ctx):
     async def cb_add(call: types.CallbackQuery):
         """
         Начинает флоу добавления аккаунта — шаг 1 (ввод имени).
-
-        Сбрасывает предыдущее pending_names, переводит пользователя
-        в состояние add_name_pre, показывает инструкцию и заметку
-        о 2FA.
 
         :param call: callback_query от кнопки "➕ ДОБАВИТЬ АККАУНТ".
         """
@@ -61,6 +61,10 @@ def register(ctx):
             if PASSWORD_2FA
             else '\n🔓 Авто-2FA отключён.\n'
         )
+        email_note = (
+            f"\n📧 Будет привязана почта: {LOGIN_EMAIL}\n"
+            if LOGIN_EMAIL else ""
+        )
 
         text = (
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -69,17 +73,13 @@ def register(ctx):
             "📝 Шаг 1 из 4\n\n"
             "🏷 Введите название аккаунта (до 64 символов).\n\n"
             "Или отправьте «-», чтобы использовать номер."
-            f"{auto_note}"
+            f"{auto_note}{email_note}"
         )
         await edit_or_send(bot, call, text, kbd.cancel())
 
     async def state_add_name_pre(message, state):
         """
         Шаг 1: принимает имя аккаунта или "-" для дефолтного.
-
-        Валидирует длину (до 64 символов), сохраняет в pending_names
-        (или None, если дефолт), переводит пользователя в состояние
-        add_phone.
 
         :param message: объект Message с именем.
         :param state: текущее FSM-состояние пользователя.
@@ -115,9 +115,6 @@ def register(ctx):
     async def state_add_phone(message, state):
         """
         Шаг 2: принимает номер телефона и отправляет код.
-
-        Валидирует формат, вызывает start_login, сохраняет клиент и
-        хэш кода в pending_signins, переводит в состояние add_code.
 
         :param message: объект Message с номером.
         :param state: текущее FSM-состояние пользователя.
@@ -168,10 +165,6 @@ def register(ctx):
         """
         Шаг 3: принимает код из Telegram.
 
-        Вызывает confirm_code. Если вход удался — идёт в _apply_post_login
-        и _finalize_add. Если нужен 2FA — переводит в состояние add_2fa.
-        При ошибке — показывает сообщение.
-
         :param message: объект Message с кодом.
         :param state: текущее FSM-состояние пользователя.
         """
@@ -193,6 +186,10 @@ def register(ctx):
             session, two_fa_value = await _apply_post_login(
                 message, data, password_used=""
             )
+            data["session"] = session
+            data["two_fa_value"] = two_fa_value
+            if await _maybe_send_email_step(message, uid, data):
+                return
             await _finalize_add(message, uid, data, session, two_fa_value)
             return
 
@@ -219,9 +216,6 @@ def register(ctx):
         """
         Шаг 4: принимает пароль 2FA.
 
-        Вызывает confirm_2fa, после успеха идёт в _apply_post_login
-        и _finalize_add.
-
         :param message: объект Message с паролем 2FA.
         :param state: текущее FSM-состояние пользователя.
         """
@@ -243,15 +237,15 @@ def register(ctx):
         session, two_fa_value = await _apply_post_login(
             message, data, password_used=password
         )
+        data["session"] = session
+        data["two_fa_value"] = two_fa_value
+        if await _maybe_send_email_step(message, uid, data):
+            return
         await _finalize_add(message, uid, data, session, two_fa_value)
 
     async def _apply_post_login(message, data, password_used: str):
         """
         Пост-логин: устанавливает или меняет 2FA-пароль из config.
-
-        Все ошибки логируются и сообщаются пользователю, но не
-        прерывают сохранение. Возвращает актуальную session (после
-        edit_2fa она меняется) и итоговое значение 2FA.
 
         :param message: объект Message для отправки уведомлений.
         :param data: словарь из pending_signins с клиентом и номером.
@@ -314,13 +308,104 @@ def register(ctx):
 
         return session, two_fa_value
 
+    async def _maybe_send_email_step(message, uid, data):
+        """
+        Опциональный шаг: отправляет код на email и переводит FSM
+        в состояние add_email_code.
+
+        Вызывается только если LOGIN_EMAIL задан в config.py.
+        Если отправка не удалась — шаг пропускается (возврат False),
+        и вызывающий код сразу идёт в _finalize_add.
+
+        :param message: объект Message.
+        :param uid: Telegram ID пользователя.
+        :param data: словарь из pending_signins.
+        :return: True, если перешли в FSM (ждём код), иначе False.
+        """
+        if not LOGIN_EMAIL:
+            return False
+
+        ok, msg, hash_val, length = await request_email_code(
+            data["client"], data["phone"], LOGIN_EMAIL
+        )
+        if not ok:
+            logger.warning(f"[email_step] {data['phone']}: {msg}")
+            await bot.send_message(
+                message.chat.id,
+                f"⚠️ Не удалось отправить код на {LOGIN_EMAIL}: {msg}\n\n"
+                "Пропускаю шаг привязки почты.",
+            )
+            return False
+
+        data["email_hash"] = hash_val
+        ctx.pending_signins[uid] = data
+        ctx.user_state[uid] = {"state": "add_email_code"}
+
+        await bot.send_message(
+            message.chat.id,
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📧 ПРИВЯЗКА ПОЧТЫ\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📞 Номер: {data['phone']}\n"
+            f"📧 Email: {LOGIN_EMAIL}\n\n"
+            f"Введите {length}-значный код из письма.\n\n"
+            "Если код не пришёл — отправьте «-», чтобы пропустить шаг.",
+            reply_markup=kbd.cancel(),
+        )
+        return True
+
+    async def state_add_email_code(message, state):
+        """
+        Шаг 5 (опциональный): принимает код из email и подтверждает привязку.
+
+        Если пользователь отправил «-» — шаг пропускается, аккаунт
+        сохраняется без привязки email.
+
+        :param message: объект Message с кодом.
+        :param state: текущее FSM-состояние пользователя.
+        """
+        uid = message.from_user.id
+        code = (message.text or "").strip()
+
+        data = ctx.pending_signins.get(uid)
+        if not data or "email_hash" not in data:
+            await bot.send_message(message.chat.id, "❌ Сессия потеряна")
+            ctx.user_state.pop(uid, None)
+            ctx.pending_signins.pop(uid, None)
+            return
+
+        session = data.get("session", "")
+        two_fa_value = data.get("two_fa_value", "")
+
+        if code == "-" or not code:
+            await bot.send_message(
+                message.chat.id,
+                "⏭ Пропускаю привязку почты.",
+            )
+            await _finalize_add(message, uid, data, session, two_fa_value)
+            return
+
+        ok, msg, email = await confirm_email_code(
+            data["client"], data["phone"], data["email_hash"], code
+        )
+
+        if ok:
+            email_shown = email or LOGIN_EMAIL
+            await bot.send_message(
+                message.chat.id,
+                f"✅ Почта {email_shown} привязана для входа",
+            )
+        else:
+            await bot.send_message(
+                message.chat.id,
+                f"❌ Не удалось привязать почту: {msg}",
+            )
+
+        await _finalize_add(message, uid, data, session, two_fa_value)
+
     async def _finalize_add(message, uid, data, session, two_fa_value):
         """
         Сохраняет аккаунт в БД, закрывает клиент, планирует автоочистку.
-
-        Если сохранение не удалось — уведомляет пользователя и
-        закрывает подвисший клиент. При успехе показывает финальную
-        карточку с кнопками перехода к аккаунту, хранилищу и меню.
 
         :param message: объект Message для ответа.
         :param uid: Telegram ID пользователя.
@@ -416,7 +501,7 @@ def register(ctx):
             "📌 Статус:   ⚠️ Ожидает очистки"
         )
         markup = kbd.kb([
-            [kbd.btn("🔙 К АККАУНТУ", f"acc_view_{acc.id}_0")],
+            [kbd.btn("🔙 К АККАУНТУ", f"acc_view_{acc.id}_r")],
             [kbd.btn("📦 ХРАНИЛИЩЕ", "storage")],
             [kbd.btn("🏠 ГЛАВНОЕ МЕНЮ", "main_menu")],
         ])
@@ -429,16 +514,13 @@ def register(ctx):
         """
         FSM-обработчик переименования аккаунта.
 
-        Принимает новое имя, валидирует длину, обновляет в БД,
-        логирует действие и показывает карточку с новым названием.
-
         :param message: объект Message с новым именем.
-        :param state: словарь с acc_id и page.
+        :param state: словарь с acc_id и page (origin).
         """
         uid = message.from_user.id
         new_name = (message.text or "").strip()
         acc_id = state.get("acc_id")
-        page = state.get("page", 0)
+        origin = state.get("page", "r")
 
         if not acc_id:
             ctx.user_state.pop(uid, None)
@@ -470,18 +552,83 @@ def register(ctx):
             f"📞 {acc.phone}\n"
             f"🏷 Новое: {new_name}",
             reply_markup=kbd.kb([
-                [kbd.btn("🔙 К АККАУНТУ", f"acc_view_{acc_id}_{page}")],
+                [kbd.btn("🔙 К АККАУНТУ", f"acc_view_{acc_id}_{origin}")],
                 [kbd.btn("📦 ХРАНИЛИЩЕ", "storage")],
                 [kbd.btn("🏠 ГЛАВНОЕ МЕНЮ", "main_menu")],
             ]),
         )
+
+    async def state_email_verify(message, state):
+        """
+        FSM-обработчик ввода кода из email при привязке почты к уже
+        существующему аккаунту (запускается из карточки аккаунта).
+
+        :param message: объект Message с кодом.
+        :param state: dict с acc_id, origin, email_hash.
+        """
+        uid = message.from_user.id
+        code = (message.text or "").strip()
+        acc_id = state.get("acc_id")
+        origin = state.get("origin", "r")
+        email_hash = state.get("email_hash")
+
+        if not acc_id or not email_hash:
+            ctx.user_state.pop(uid, None)
+            await bot.send_message(message.chat.id, "❌ Сессия потеряна")
+            return
+
+        acc = db.get_account(acc_id)
+        if not acc:
+            ctx.user_state.pop(uid, None)
+            await bot.send_message(message.chat.id, "❌ Аккаунт не найден")
+            return
+
+        try:
+            client = await _get_client(acc.phone, acc.session)
+        except Exception as e:
+            logger.error(f"[email_verify] connect: {type(e).__name__}: {e}")
+            ctx.user_state.pop(uid, None)
+            await bot.send_message(
+                message.chat.id, f"❌ Не удалось подключиться: {e}")
+            return
+
+        ok, msg, email = await confirm_email_code(
+            client, acc.phone, email_hash, code
+        )
+
+        ctx.user_state.pop(uid, None)
+        ctx.pending_signins.pop(uid, None)
+
+        if ok:
+            email_shown = email or LOGIN_EMAIL
+            await bot.send_message(
+                message.chat.id,
+                f"✅ Почта {email_shown} привязана для входа\n\n"
+                f"📞 {acc.phone}",
+                reply_markup=kbd.kb([
+                    [kbd.btn("🔙 К АККАУНТУ",
+                             f"acc_view_{acc_id}_{origin}")],
+                    [kbd.btn("🏠 МЕНЮ", "main_menu")],
+                ]),
+            )
+        else:
+            await bot.send_message(
+                message.chat.id,
+                f"❌ Не удалось привязать почту: {msg}",
+                reply_markup=kbd.kb([
+                    [kbd.btn("🔙 К АККАУНТУ",
+                             f"acc_view_{acc_id}_{origin}")],
+                ]),
+            )
 
     local_handlers = {
         "add_name_pre": state_add_name_pre,
         "add_phone": state_add_phone,
         "add_code": state_add_code,
         "add_2fa": state_add_2fa,
+        "add_email_code": state_add_email_code,
         "rename_account": state_rename_account,
+        "email_verify": state_email_verify,
     }
 
     @bot.message_handler(func=lambda m: True, content_types=["text"])
@@ -489,14 +636,6 @@ def register(ctx):
     async def text_router(message: types.Message):
         """
         Централизованный роутер текстовых сообщений.
-
-        Определяет, в каком FSM-состоянии находится пользователь,
-        и вызывает соответствующий обработчик. Объединяет локальные
-        хендлеры этого модуля и FSM из lzt_buy через
-        ctx._buy_state_handlers.
-
-        Если пользователь не в состоянии — подсказывает /start.
-        Команды (начинающиеся на "/") игнорирует.
 
         :param message: объект Message с текстом.
         """

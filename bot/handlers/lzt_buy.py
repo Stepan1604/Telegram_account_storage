@@ -22,10 +22,9 @@ def register(ctx):
     """
     Регистрирует хендлеры покупки аккаунтов через LZT Market.
 
-    Включает: меню покупки, одиночную покупку (случайная страна /
-    конкретная страна), оптовую закупку, импорт уже купленных лотов,
-    остановку процесса, FSM ввода страны/цены/количества и функции
-    сохранения купленного в БД.
+    Включает: меню покупки, одиночную (случайная / конкретная страна),
+    оптовую, импорт, остановку, FSM ввода страны/цены/количества
+    и функции сохранения купленного.
 
     :param ctx: объект Context с общим состоянием.
     """
@@ -46,9 +45,6 @@ def register(ctx):
     async def _render_buy_menu(chat_id, edit_id=None, call=None):
         """
         Рисует меню покупки номеров.
-
-        Если LZT недоступен — показывает сообщение об ошибке.
-        Иначе — список режимов покупки.
 
         :param chat_id: ID чата.
         :param edit_id: ID сообщения для редактирования.
@@ -102,8 +98,6 @@ def register(ctx):
         """
         Запускает покупку одного лота со случайной страной.
 
-        Переводит пользователя в состояние buy_price.
-
         :param call: callback_query от кнопки "🎲 СЛУЧАЙНАЯ СТРАНА".
         """
         await bot.answer_callback_query(call.id)
@@ -126,8 +120,6 @@ def register(ctx):
     async def cb_buy_single_country(call: types.CallbackQuery):
         """
         Запускает покупку одного лота с конкретной страной.
-
-        Переводит пользователя в состояние buy_country.
 
         :param call: callback_query от кнопки "🌍 КОНКРЕТНАЯ СТРАНА".
         """
@@ -152,8 +144,6 @@ def register(ctx):
         """
         Запускает оптовую закупку.
 
-        Переводит пользователя в состояние buy_bulk_count.
-
         :param call: callback_query от кнопки "📦 ОПТОВАЯ ЗАКУПКА".
         """
         await bot.answer_callback_query(call.id)
@@ -175,9 +165,6 @@ def register(ctx):
     async def cb_buy_import(call: types.CallbackQuery):
         """
         Запускает импорт уже купленных лотов с LZT.
-
-        Проверяет готовность LZT и отсутствие активных задач,
-        затем создаёт фоновую задачу _import_purchases.
 
         :param call: callback_query от кнопки "📥 ИМПОРТ ПОКУПОК LZT".
         """
@@ -208,8 +195,6 @@ def register(ctx):
         """
         Останавливает текущую покупку.
 
-        Устанавливает флаг отмены в ctx.buy_cancel.
-
         :param call: callback_query от кнопки "⛔ СТОП".
         """
         await bot.answer_callback_query(call.id, "⏹ Останавливаю...")
@@ -218,9 +203,6 @@ def register(ctx):
     async def state_buy_country(message, state):
         """
         FSM-обработчик ввода страны для покупки.
-
-        Валидирует длину названия, сохраняет в buy_ctx и переводит
-        в состояние buy_price.
 
         :param message: объект Message с названием страны.
         :param state: текущее FSM-состояние пользователя.
@@ -245,8 +227,6 @@ def register(ctx):
         """
         FSM-обработчик ввода максимальной цены.
 
-        Парсит число, проверяет > 0, запускает одиночную покупку.
-
         :param message: объект Message с ценой.
         :param state: текущее FSM-состояние пользователя.
         """
@@ -266,9 +246,6 @@ def register(ctx):
     async def state_buy_bulk_count(message, state):
         """
         FSM-обработчик ввода количества для опта.
-
-        Валидирует число 1–100, сохраняет в buy_ctx и переводит
-        в состояние buy_bulk_price.
 
         :param message: объект Message с количеством.
         :param state: текущее FSM-состояние пользователя.
@@ -292,8 +269,6 @@ def register(ctx):
     async def state_buy_bulk_price(message, state):
         """
         FSM-обработчик ввода максимальной цены для опта.
-
-        Парсит число, проверяет > 0, запускает оптовую покупку.
 
         :param message: объект Message с ценой.
         :param state: текущее FSM-состояние пользователя.
@@ -324,10 +299,6 @@ def register(ctx):
                            item_country, item_id):
         """
         Сохраняет купленный аккаунт в БД и записывает LZT-покупку.
-
-        Сначала создаёт запись в lzt_purchases, потом в accounts.
-        Планирует автоочистку. Обновляет статус LZT-записи на
-        logged_in.
 
         :param phone: номер телефона.
         :param session_str: строка сессии.
@@ -392,9 +363,10 @@ def register(ctx):
         """
         Выполняет покупку одного лота.
 
-        Ищет самый дешёвый лот по фильтру (цена, страна), покупает,
-        логинится в аккаунт, сохраняет сессию. Показывает прогресс
-        в одном сообщении. Поддерживает отмену через ctx.buy_cancel.
+        Всё тело обёрнуто в общий таймаут 300 секунд. Поддерживает
+        отмену через ctx.buy_cancel и передаёт ctx_cancel в
+        retry_login_to_account — тот автоматически повторяет вход
+        при таймаутах / пустых ответах LZT.
 
         :param chat_id: ID чата для отправки прогресса.
         :param uid: Telegram ID админа.
@@ -410,7 +382,7 @@ def register(ctx):
             reply_markup=kbd.buy_stop_kb(),
         )
 
-        try:
+        async def _worker():
             market = lzt.make_market()
             balance, balance_id = await lzt.get_balance(market)
 
@@ -472,11 +444,51 @@ def register(ctx):
                     continue
 
                 phone = fmt_phone(phone)
-                session_str, status = await lzt.login_to_account(
-                    phone, item_id, market, password=password
+
+                def _is_cancelled():
+                    return ctx.buy_cancel.get(uid, False)
+
+                session_str, status = await lzt.retry_login_to_account(
+                    phone, item_id, market, password=password,
+                    ctx_cancel=_is_cancelled, max_attempts=2,
                 )
 
                 if not session_str:
+                    if status == "cancelled":
+                        await safe_edit(
+                            bot, chat_id, msg.message_id,
+                            "⏹ Покупка отменена пользователем.\n\n"
+                            f"🆔 Лот: {item_id}\n"
+                            f"📞 {phone}\n\n"
+                            "Аккаунт не сохранён. Если лот куплен, "
+                            "его можно забрать через «📥 LZT-ЛОГИ».",
+                            kbd.back_main(),
+                        )
+                        return
+
+                    if status in ("timeout",) or status.startswith("error:"):
+                        try:
+                            db.add_lzt_purchase(
+                                item_id=item_id, phone=phone,
+                                price=int(price or 0),
+                                country=item_country or "",
+                                status="failed", error=status,
+                            )
+                        except Exception:
+                            pass
+                        await bot.send_message(
+                            chat_id,
+                            f"⏱️ Лот {item_id} куплен за {price} ₽, "
+                            f"но вход не завершён после двух попыток "
+                            f"({status}).\n\n"
+                            f"📞 {phone}\n\n"
+                            f"💡 {lzt_error_hint(status)}\n\n"
+                            "Попробуй через «📥 LZT-ЛОГИ» → "
+                            "«🔁 Повторить вход».",
+                        )
+                        skip_ids.add(item_id)
+                        continue
+
                     try:
                         db.add_lzt_purchase(
                             item_id=item_id, phone=phone,
@@ -523,6 +535,16 @@ def register(ctx):
             await safe_edit(bot, chat_id, msg.message_id,
                             "⏹ Остановлено", kbd.back_main())
 
+        try:
+            await asyncio.wait_for(_worker(), timeout=300)
+        except asyncio.TimeoutError:
+            await safe_edit(
+                bot, chat_id, msg.message_id,
+                "⏱️ Покупка заняла больше 5 минут — остановлено.\n\n"
+                "Проверьте LZT-логи: возможно, лот был куплен, "
+                "но вход не завершён.",
+                kbd.back_main(),
+            )
         except Exception as e:
             logger.exception(f"[buy.single] {e}")
             await safe_edit(bot, chat_id, msg.message_id,
@@ -619,8 +641,13 @@ def register(ctx):
                     continue
 
                 phone = fmt_phone(phone)
-                session_str, status = await lzt.login_to_account(
-                    phone, item_id, market, password=password
+
+                def _is_cancelled():
+                    return ctx.buy_cancel.get(uid, False)
+
+                session_str, status = await lzt.retry_login_to_account(
+                    phone, item_id, market, password=password,
+                    ctx_cancel=_is_cancelled, max_attempts=2,
                 )
 
                 if not session_str:
@@ -636,6 +663,8 @@ def register(ctx):
                         )
                     except Exception:
                         pass
+                    if status == "cancelled":
+                        break
                     continue
 
                 acc = await _save_bought(phone, session_str, password,
@@ -675,10 +704,6 @@ def register(ctx):
     async def _import_purchases(chat_id, msg_id, uid):
         """
         Импортирует уже купленные лоты LZT в хранилище.
-
-        Получает список покупок, отфильтровывает неизвестные и
-        не-Telegram, для каждого пытается войти в аккаунт и сохранить
-        в БД. Показывает прогресс и поддерживает отмену.
 
         :param chat_id: ID чата.
         :param msg_id: ID сообщения для редактирования.
@@ -769,8 +794,12 @@ def register(ctx):
                         password = str(login_data[key])
                         break
 
-                session_str, status = await lzt.login_to_account(
-                    phone, item_id, market, password=password
+                def _is_cancelled():
+                    return ctx.buy_cancel.get(uid, False)
+
+                session_str, status = await lzt.retry_login_to_account(
+                    phone, item_id, market, password=password,
+                    ctx_cancel=_is_cancelled, max_attempts=2,
                 )
 
                 if not session_str:
@@ -784,6 +813,8 @@ def register(ctx):
                         )
                     except Exception:
                         pass
+                    if status == "cancelled":
+                        break
                     continue
 
                 acc = await _save_bought(phone, session_str, password,
