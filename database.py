@@ -474,7 +474,7 @@ def restore_from_backup() -> int:
     Дополняет БД аккаунтами из бэкапа.
 
     Восстанавливает только те номера, которых нет в БД (включая
-    архивные). Существующие аккаунты не трогает.
+    удалённые). Существующие аккаунты не трогает.
 
     :return: количество восстановленных аккаунтов.
     """
@@ -768,17 +768,14 @@ def add_account(phone: str, session_str: str, two_fa: str = "",
     return True
 
 
-def get_accounts(include_archived: bool = False):
+def get_accounts():
     """
     Возвращает все аккаунты, отсортированные по избранному и id.
 
-    :param include_archived: включать ли архивные (deleted_at != None).
     :return: список объектов Account.
     """
     with scope() as s:
-        q = s.query(Account)
-        if not include_archived:
-            q = q.filter(Account.deleted_at.is_(None))
+        q = s.query(Account).filter(Account.deleted_at.is_(None))
         return q.order_by(
             Account.favorite.desc(),
             Account.id.desc(),
@@ -847,19 +844,6 @@ def get_accounts_by_country(country_code: str):
         ).all()
 
 
-def get_archived_accounts():
-    """
-    Возвращает архивные (удалённые мягко) аккаунты.
-
-    :return: список объектов Account.
-    """
-    with scope() as s:
-        return (s.query(Account)
-                .filter(Account.deleted_at.isnot(None))
-                .order_by(Account.deleted_at.desc())
-                .all())
-
-
 def get_account(account_id: int):
     """
     Возвращает аккаунт по ID.
@@ -919,37 +903,6 @@ def delete_account_soft(account_id: int) -> bool:
         acc = s.get(Account, account_id)
         if acc:
             s.delete(acc)
-    return True
-
-
-def archive_account(account_id: int) -> bool:
-    """
-    Мягко удаляет аккаунт: ставит deleted_at = now.
-
-    Бэкап не трогает — аккаунт остаётся в файле.
-
-    :param account_id: ID аккаунта.
-    :return: True.
-    """
-    with scope() as s:
-        acc = s.get(Account, account_id)
-        if acc:
-            acc.deleted_at = datetime.now()
-    return True
-
-
-def restore_account(account_id: int) -> bool:
-    """
-    Восстанавливает аккаунт из архива.
-
-    :param account_id: ID аккаунта.
-    :return: True.
-    """
-    with scope() as s:
-        acc = s.get(Account, account_id)
-        if acc:
-            acc.deleted_at = None
-    save_backup()
     return True
 
 
@@ -1100,7 +1053,7 @@ def get_accounts_stats() -> dict:
     Собирает статистику по аккаунтам.
 
     :return: словарь с ключами total, cleaned, uncleaned, dead,
-        favorites, archived.
+        favorites.
     """
     with scope() as s:
         base = s.query(Account).filter(Account.deleted_at.is_(None))
@@ -1109,15 +1062,12 @@ def get_accounts_stats() -> dict:
         uncleaned = base.filter(Account.status == "uncleaned").count()
         dead = base.filter(Account.status == "dead").count()
         favorites = base.filter(Account.favorite == 1).count()
-        archived = (s.query(Account)
-                    .filter(Account.deleted_at.isnot(None)).count())
     return {
         "total": total,
         "cleaned": cleaned,
         "uncleaned": uncleaned,
         "dead": dead,
         "favorites": favorites,
-        "archived": archived,
     }
 
 

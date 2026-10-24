@@ -68,7 +68,7 @@ def register(ctx):
             f"  🧹 Очищено:          {s['cleaned']}\n"
             f"  ⚠️ Не очищено:       {s['uncleaned']}\n"
             f"  ❌ Мёртвых:          {s['dead']}\n"
-            f"  📦 В архиве:         {s['archived']}\n\n"
+            "\n"
             "🛒 LZT MARKET\n\n"
             f"  🎯 Всего покупок:    {lzt_s['total']}\n"
             f"  ✅ Вошёл:            {lzt_s['logged_in']}\n"

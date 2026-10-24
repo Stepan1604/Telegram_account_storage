@@ -19,7 +19,6 @@ def main_menu() -> types.InlineKeyboardMarkup:
         [btn("📊 ОТЧЁТЫ", "reports_menu"), btn("📥 LZT-ЛОГИ", "lzt_logs")],
         [btn("🔍 ПРОВЕРКА АККАУНТОВ", "check_accounts")],
         [btn("🗑️ УДАЛИТЬ МЁРТВЫЕ", "del_dead")],
-        [btn("🗄 АРХИВ", "archive")],
         [btn("🧹 ОЧИСТИТЬ СЕССИИ", "clean_sessions")],
         [btn("➕ ДОБАВИТЬ АККАУНТ", "add_account")],
     ])
@@ -104,7 +103,7 @@ def favorites_page(accounts, page: int, total_pages: int,
     if page < total_pages - 1:
         nav.append(btn("➡️", f"favorites_page_{page + 1}"))
     rows.append(nav)
-    rows.append([btn("🔙 НАЗАД", "main_menu")])
+    rows.append([btn("🔙 НАЗАД", "storage")])
     return kb(rows)
 
 
@@ -300,18 +299,4 @@ def buy_after() -> types.InlineKeyboardMarkup:
         [btn("📦 ХРАНИЛИЩЕ", "storage")],
         [btn("🛒 ЕЩЁ КУПИТЬ", "buy_menu")],
         [btn("🏠 ГЛАВНОЕ МЕНЮ", "main_menu")],
-    ])
-
-
-def archive_kb(count: int) -> types.InlineKeyboardMarkup:
-    return kb([
-        [btn(f"🗑 ОЧИСТИТЬ АРХИВ ({count})", "archive_clear")],
-        [btn("🏠 ГЛАВНОЕ МЕНЮ", "main_menu")],
-    ])
-
-
-def confirm_clear_archive(count: int) -> types.InlineKeyboardMarkup:
-    return kb([
-        [btn(f"✅ УДАЛИТЬ {count} ИЗ АРХИВА", "archive_clear_yes")],
-        [btn("❌ ОТМЕНА", "archive")],
     ])
