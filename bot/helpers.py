@@ -9,16 +9,108 @@ from config import COUNTRIES
 logger = logging.getLogger(__name__)
 
 
+COUNTRY_EN_TO_RU = {
+    "USA": "США",
+    "United States": "США",
+    "United Kingdom": "Великобритания",
+    "UK": "Великобритания",
+    "Canada": "Канада",
+    "Germany": "Германия",
+    "France": "Франция",
+    "Spain": "Испания",
+    "Italy": "Италия",
+    "Netherlands": "Нидерланды",
+    "Poland": "Польша",
+    "Sweden": "Швеция",
+    "Norway": "Норвегия",
+    "Finland": "Финляндия",
+    "Denmark": "Дания",
+    "Portugal": "Португалия",
+    "Greece": "Греция",
+    "Czechia": "Чехия",
+    "Czech Republic": "Чехия",
+    "Romania": "Румыния",
+    "Bulgaria": "Болгария",
+    "Hungary": "Венгрия",
+    "Austria": "Австрия",
+    "Switzerland": "Швейцария",
+    "Ireland": "Ирландия",
+    "Belgium": "Бельгия",
+    "Turkey": "Турция",
+    "India": "Индия",
+    "Indonesia": "Индонезия",
+    "Thailand": "Таиланд",
+    "Vietnam": "Вьетнам",
+    "Malaysia": "Малайзия",
+    "Philippines": "Филиппины",
+    "Japan": "Япония",
+    "South Korea": "Южная Корея",
+    "Korea": "Южная Корея",
+    "China": "Китай",
+    "Hong Kong": "Гонконг",
+    "Pakistan": "Пакистан",
+    "Bangladesh": "Бангладеш",
+    "Myanmar": "Мьянма",
+    "Cambodia": "Камбоджа",
+    "Sri Lanka": "Шри-Ланка",
+    "Nepal": "Непал",
+    "Brazil": "Бразилия",
+    "Argentina": "Аргентина",
+    "Mexico": "Мексика",
+    "Colombia": "Колумбия",
+    "Chile": "Чили",
+    "Peru": "Перу",
+    "Venezuela": "Венесуэла",
+    "Ecuador": "Эквадор",
+    "Nigeria": "Нигерия",
+    "Kenya": "Кения",
+    "Egypt": "Египет",
+    "South Africa": "ЮАР",
+    "Morocco": "Марокко",
+    "Tunisia": "Тунис",
+    "Algeria": "Алжир",
+    "Iran": "Иран",
+    "Iraq": "Ирак",
+    "Saudi Arabia": "Саудовская Аравия",
+    "United Arab Emirates": "ОАЭ",
+    "UAE": "ОАЭ",
+    "Israel": "Израиль",
+    "Kazakhstan": "Казахстан",
+    "Uzbekistan": "Узбекистан",
+    "Kyrgyzstan": "Киргизия",
+    "Tajikistan": "Таджикистан",
+    "Ukraine": "Украина",
+    "Belarus": "Беларусь",
+    "Moldova": "Молдова",
+    "Georgia": "Грузия",
+    "Armenia": "Армения",
+    "Azerbaijan": "Азербайджан",
+    "Russia": "Россия",
+    "Australia": "Австралия",
+    "New Zealand": "Новая Зеландия",
+}
+
+
+def country_ru(name: str) -> str:
+    """
+    Возвращает русское название страны.
+
+    Ищет в словаре COUNTRY_EN_TO_RU по точному совпадению (регистро-
+    независимо). Если не находит — возвращает исходное название.
+
+    :param name: английское название (как приходит из LZT).
+    :return: русское название или исходное, если не найдено.
+    """
+    if not name:
+        return name
+    low = name.strip().lower()
+    for en, ru in COUNTRY_EN_TO_RU.items():
+        if en.lower() == low:
+            return ru
+    return name
+
+
 def fmt_phone(phone: str) -> str:
-    """
-    Приводит номер телефона к единому формату +XXXXXXXXXXX.
-
-    Удаляет пробелы, скобки, дефисы, точки. Оставляет только цифры
-    и ведущий плюс.
-
-    :param phone: номер в любом формате.
-    :return: нормализованный номер с ведущим плюсом.
-    """
     if not phone:
         return phone
     s = str(phone).strip()
@@ -32,12 +124,6 @@ def fmt_phone(phone: str) -> str:
 
 
 def get_country_code(phone: str) -> str:
-    """
-    Определяет код страны (RU, US, ...) по номеру телефона.
-
-    :param phone: номер телефона.
-    :return: код страны (например, "US") или пустая строка.
-    """
     if not phone:
         return ""
     p = fmt_phone(phone)
@@ -48,12 +134,6 @@ def get_country_code(phone: str) -> str:
 
 
 def country_label(phone: str) -> str:
-    """
-    Возвращает красивое название страны с флагом по номеру телефона.
-
-    :param phone: номер телефона.
-    :return: строка вида "🇷🇺 Россия (+7)" или "🌍 Неизвестно".
-    """
     if not phone:
         return "🌍 Неизвестно"
     p = fmt_phone(phone)
@@ -64,13 +144,6 @@ def country_label(phone: str) -> str:
 
 
 def country_label_by_code(code: str) -> str:
-    """
-    Возвращает название страны с флагом по её коду (RU, US, ...).
-
-    :param code: код страны из config.COUNTRIES, или "" для группы
-        аккаунтов без определённой страны.
-    :return: строка вида "🇷🇺 Россия" или "🌍 Без страны".
-    """
     if not code:
         return "🌍 Без страны"
     for c in COUNTRIES:
@@ -80,12 +153,6 @@ def country_label_by_code(code: str) -> str:
 
 
 def status_label(s: str) -> str:
-    """
-    Возвращает человекочитаемую метку статуса аккаунта.
-
-    :param s: статус ("cleaned", "uncleaned", "dead").
-    :return: строка с эмодзи.
-    """
     return {
         "cleaned": "🧹 Очищен от чужих сессий",
         "uncleaned": "⚠️ Ожидает очистки",
@@ -94,12 +161,6 @@ def status_label(s: str) -> str:
 
 
 def format_remaining(seconds: float) -> str:
-    """
-    Форматирует количество секунд в строку вида "Xч Yм".
-
-    :param seconds: количество секунд (может быть отрицательным).
-    :return: строка "Xч Yм" или "ожидается", если время истекло.
-    """
     if seconds <= 0:
         return "ожидается"
     h = int(seconds // 3600)
@@ -108,12 +169,6 @@ def format_remaining(seconds: float) -> str:
 
 
 def _fmt_dt(dt) -> str:
-    """
-    Форматирует datetime в строку "ДД.ММ.ГГГГ в ЧЧ:ММ".
-
-    :param dt: объект datetime или None.
-    :return: отформатированная строка или "—".
-    """
     if not dt:
         return "—"
     try:
@@ -123,12 +178,6 @@ def _fmt_dt(dt) -> str:
 
 
 def _fmt_dt_csv(dt) -> str:
-    """
-    Форматирует datetime для CSV-экспорта.
-
-    :param dt: объект datetime или None.
-    :return: строка "ДД.ММ.ГГГГ ЧЧ:ММ:СС" или пустая строка.
-    """
     if not dt:
         return ""
     try:
@@ -138,12 +187,6 @@ def _fmt_dt_csv(dt) -> str:
 
 
 def lzt_status_label(s: str) -> str:
-    """
-    Возвращает человекочитаемую метку статуса LZT-покупки.
-
-    :param s: статус ("bought", "logged_in", "failed").
-    :return: строка с эмодзи.
-    """
     return {
         "bought": "🟡 Куплен (вход не выполнялся)",
         "logged_in": "🟢 Успешный вход в аккаунт",
@@ -152,16 +195,6 @@ def lzt_status_label(s: str) -> str:
 
 
 def lzt_error_hint(status: str) -> str:
-    """
-    Возвращает подсказку по ошибке LZT-входа.
-
-    Расшифровывает технический статус в человеческое объяснение и
-    совет, что делать. Учитывает как «смысловые» статусы (needs_2fa,
-    phone_banned), так и технические (timeout, error:*).
-
-    :param status: технический код ошибки.
-    :return: строка-подсказка.
-    """
     hints = {
         "no_code_from_market": (
             "LZT не отдал код за отведённое время.\n"
@@ -183,12 +216,8 @@ def lzt_error_hint(status: str) -> str:
             "Telegram не даёт запросить код.\n"
             "💡 Подожди 1–2 минуты и повтори."
         ),
-        "phone_banned": (
-            "Номер забанен Telegram — восстановить нельзя."
-        ),
-        "phone_invalid": (
-            "Неверный формат номера. Обратись в поддержку LZT."
-        ),
+        "phone_banned": "Номер забанен Telegram — восстановить нельзя.",
+        "phone_invalid": "Неверный формат номера. Обратись в поддержку LZT.",
         "phone_flood": (
             "Слишком частые запросы на номер.\n"
             "💡 Подожди 10–15 минут."
@@ -198,8 +227,10 @@ def lzt_error_hint(status: str) -> str:
             "💡 Проверь соединение и повтори. "
             "Покупка не отменена — лот уже твой, вход можно повторить."
         ),
-        "cancelled": (
-            "Операция отменена пользователем."
+        "cancelled": "Операция отменена пользователем.",
+        "auth_restart": (
+            "Telegram запросил перезапуск авторизации.\n"
+            "💡 Повтори вход — обычно проходит со второй попытки."
         ),
         "error:session_save": (
             "Telegram не дал сохранить сессию.\n"
@@ -238,19 +269,10 @@ def lzt_error_hint(status: str) -> str:
             "💡 Повтори вход через LZT-ЛОГИ."
         )
 
-    return hints.get(
-        status,
-        "Неизвестная причина. Проверь логи бота."
-    )
+    return hints.get(status, "Неизвестная причина. Проверь логи бота.")
 
 
 def md_escape(text: str) -> str:
-    """
-    Экранирует спецсимволы Markdown V1 для Telegram.
-
-    :param text: текст для экранирования.
-    :return: безопасный текст.
-    """
     if not text:
         return ""
     for ch in ("_", "*", "`", "["):
@@ -259,16 +281,6 @@ def md_escape(text: str) -> str:
 
 
 async def edit_or_send(bot, call, text, markup=None, parse_mode=None):
-    """
-    Редактирует сообщение или отправляет новое, если редактирование
-    невозможно.
-
-    :param bot: экземпляр AsyncTeleBot.
-    :param call: callback_query от пользователя.
-    :param text: текст сообщения.
-    :param markup: InlineKeyboardMarkup или None.
-    :param parse_mode: "Markdown", "HTML" или None.
-    """
     try:
         await bot.edit_message_text(
             chat_id=call.message.chat.id,
@@ -295,16 +307,6 @@ async def edit_or_send(bot, call, text, markup=None, parse_mode=None):
 
 
 async def safe_edit(bot, chat_id, msg_id, text, markup=None, parse_mode=None):
-    """
-    Редактирует сообщение, игнорируя ошибку "message is not modified".
-
-    :param bot: экземпляр AsyncTeleBot.
-    :param chat_id: ID чата.
-    :param msg_id: ID сообщения.
-    :param text: новый текст.
-    :param markup: InlineKeyboardMarkup или None.
-    :param parse_mode: "Markdown", "HTML" или None.
-    """
     try:
         await bot.edit_message_text(
             chat_id=chat_id,
@@ -327,12 +329,6 @@ _CSV_STATUS = {
 
 
 def _csv_writer(buf):
-    """
-    Создаёт CSV-writer с настройками под Excel/LibreOffice.
-
-    :param buf: StringIO-буфер.
-    :return: csv.writer.
-    """
     return csv.writer(
         buf,
         delimiter=";",
@@ -343,12 +339,6 @@ def _csv_writer(buf):
 
 
 def build_accounts_csv(accounts) -> bytes:
-    """
-    Собирает CSV со всеми аккаунтами.
-
-    :param accounts: список объектов Account.
-    :return: bytes готового CSV-файла.
-    """
     buf = io.StringIO()
     w = _csv_writer(buf)
     w.writerow([
@@ -377,12 +367,6 @@ def build_accounts_csv(accounts) -> bytes:
 
 
 def build_single_account_csv(acc) -> bytes:
-    """
-    Собирает CSV с одним аккаунтом.
-
-    :param acc: объект Account.
-    :return: bytes готового CSV-файла.
-    """
     buf = io.StringIO()
     w = _csv_writer(buf)
     w.writerow(["Поле", "Значение"])
@@ -407,12 +391,6 @@ def build_single_account_csv(acc) -> bytes:
 
 
 def build_logs_csv(actions) -> bytes:
-    """
-    Собирает CSV со всеми логами действий.
-
-    :param actions: список объектов ActionLog.
-    :return: bytes готового CSV-файла.
-    """
     buf = io.StringIO()
     w = _csv_writer(buf)
     w.writerow(["Дата", "Пользователь", "Действие",
@@ -429,13 +407,6 @@ def build_logs_csv(actions) -> bytes:
 
 
 def build_account_logs_csv(acc, actions) -> bytes:
-    """
-    Собирает CSV с историей действий одного аккаунта.
-
-    :param acc: объект Account.
-    :param actions: список ActionLog по этому аккаунту.
-    :return: bytes готового CSV-файла.
-    """
     buf = io.StringIO()
     w = _csv_writer(buf)
     w.writerow(["Аккаунт", acc.name or acc.phone])
@@ -455,12 +426,6 @@ def build_account_logs_csv(acc, actions) -> bytes:
 
 
 def build_lzt_logs_csv(items) -> bytes:
-    """
-    Собирает CSV со всеми LZT-покупками.
-
-    :param items: список объектов LZTPurchase.
-    :return: bytes готового CSV-файла.
-    """
     buf = io.StringIO()
     w = _csv_writer(buf)
     w.writerow(["Лот", "Номер", "Страна", "Цена (₽)", "Статус",

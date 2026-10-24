@@ -6,6 +6,7 @@ from telebot import types
 import database as db
 from .. import keyboards as kbd
 from .. import lzt
+from config import LOGIN_EMAIL as LOGIN_EMAIL_SHOWN
 from ..decorators import admin_required
 from ..helpers import (
     edit_or_send,
@@ -13,43 +14,62 @@ from ..helpers import (
     fmt_phone,
     get_country_code,
     lzt_error_hint,
+    country_ru,
 )
 
 logger = logging.getLogger(__name__)
 
+# Максимальная длина поля LZTPurchase.country в БД.
+# Держим в одном месте, чтобы обрезать во всех вызовах add_lzt_purchase
+# и не ловить в PostgreSQL "value too long for type character varying(64)".
+COUNTRY_MAX_LEN = 64
+
+# Сколько ждём код из письма, пока пользователь его не введёт
+EMAIL_CODE_WAIT = 300
+# uid -> Future, куда попадает введённый в чат код
+_EMAIL_WAITERS = {}
+
+
+def _safe_country(country) -> str:
+    """Обрезает страну до безопасной длины для колонки VARCHAR(64)."""
+    return (str(country or ""))[:COUNTRY_MAX_LEN]
+
 
 def register(ctx):
-    """
-    Регистрирует хендлеры покупки аккаунтов через LZT Market.
-
-    Включает: меню покупки, одиночную (случайная / конкретная страна),
-    оптовую, импорт, остановку, FSM ввода страны/цены/количества
-    и функции сохранения купленного.
-
-    :param ctx: объект Context с общим состоянием.
-    """
     bot = ctx.bot
 
     def _lzt_err() -> str:
-        """
-        Проверяет готовность LZT к работе.
-
-        :return: пустая строка если всё ок, иначе текст ошибки.
-        """
         if not lzt.LZT_AVAILABLE:
             return "LOLZTEAM не установлен: pip install LOLZTEAM"
         if not lzt.LZT_API_TOKEN:
             return "LZT_API_TOKEN не задан в config.py"
         return ""
 
-    async def _render_buy_menu(chat_id, edit_id=None, call=None):
+    def _log_lzt_purchase(item_id, phone, price, country,
+                          status, error="") -> None:
         """
-        Рисует меню покупки номеров.
+        Единая точка регистрации покупки в lzt_purchases.
 
-        :param chat_id: ID чата.
-        :param edit_id: ID сообщения для редактирования.
-        :param call: callback_query (если вызвано из кнопки).
+        Никогда не глушит ошибку — логирует тип и текст, чтобы такие
+        случаи были видны в server-логе, а не пропадали молча.
         """
+        try:
+            db.add_lzt_purchase(
+                item_id=item_id,
+                phone=phone,
+                price=int(price or 0),
+                country=_safe_country(country),
+                status=status,
+                error=(error or "")[:500],
+            )
+        except Exception as e:
+            logger.error(
+                f"[lzt_buy.log_purchase] item={item_id} "
+                f"phone={phone} status={status}: "
+                f"{type(e).__name__}: {e}"
+            )
+
+    async def _render_buy_menu(chat_id, edit_id=None, call=None):
         err = _lzt_err()
         if err:
             text = (
@@ -70,9 +90,10 @@ def register(ctx):
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             "💡 Выберите режим:\n\n"
             "  • 🎲 Случайная страна — самый дешёвый лот\n"
-            "  • 🌍 Конкретная страна — фильтр по стране\n"
             "  • 📦 Оптовая — купить N самых дешёвых\n"
-            "  • 📥 Импорт — войти в уже купленные лоты"
+            "  • 📥 Импорт — войти в уже купленные лоты\n\n"
+            "💳 Все покупки идут с баланса «Для покупки аккаунтов».\n"
+            "🚫 Лоты со спамблоком не покупаются."
         )
         markup = kbd.buy_menu()
         if call:
@@ -83,11 +104,6 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "buy_menu")
     @admin_required
     async def cb_buy_menu(call: types.CallbackQuery):
-        """
-        Открывает меню покупки номеров.
-
-        :param call: callback_query от кнопки "🛒 КУПИТЬ НОМЕРА".
-        """
         await bot.answer_callback_query(call.id)
         ctx.buy_ctx.pop(call.from_user.id, None)
         await _render_buy_menu(call.message.chat.id, call=call)
@@ -95,14 +111,9 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "buy_single_random")
     @admin_required
     async def cb_buy_single_random(call: types.CallbackQuery):
-        """
-        Запускает покупку одного лота со случайной страной.
-
-        :param call: callback_query от кнопки "🎲 СЛУЧАЙНАЯ СТРАНА".
-        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
-        ctx.buy_ctx[uid] = {"country": None, "count": 1}
+        ctx.buy_ctx[uid] = {"count": 1}
         ctx.user_state[uid] = {"state": "buy_price"}
 
         await edit_or_send(
@@ -111,44 +122,18 @@ def register(ctx):
             "🎲 ПОКУПКА — СЛУЧАЙНАЯ СТРАНА\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             "💰 Введите максимальную цену в ₽\n"
-            "(например: 50)",
-            kbd.buy_back(),
-        )
-
-    @bot.callback_query_handler(func=lambda c: c.data == "buy_single_country")
-    @admin_required
-    async def cb_buy_single_country(call: types.CallbackQuery):
-        """
-        Запускает покупку одного лота с конкретной страной.
-
-        :param call: callback_query от кнопки "🌍 КОНКРЕТНАЯ СТРАНА".
-        """
-        await bot.answer_callback_query(call.id)
-        uid = call.from_user.id
-        ctx.buy_ctx[uid] = {"country": "", "count": 1}
-        ctx.user_state[uid] = {"state": "buy_country"}
-
-        await edit_or_send(
-            bot, call,
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "🌍 ПОКУПКА — КОНКРЕТНАЯ СТРАНА\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "🌐 Введите название страны (можно часть):\n"
-            "Индонезия, Indonesia, США…",
+            "(например: 50)\n\n"
+            "💳 Списание пойдёт с баланса «Для покупки аккаунтов».\n"
+            "🚫 Лоты со спамблоком будут пропущены.",
             kbd.buy_back(),
         )
 
     @bot.callback_query_handler(func=lambda c: c.data == "buy_bulk")
     @admin_required
     async def cb_buy_bulk(call: types.CallbackQuery):
-        """
-        Запускает оптовую закупку.
-
-        :param call: callback_query от кнопки "📦 ОПТОВАЯ ЗАКУПКА".
-        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
-        ctx.buy_ctx[uid] = {"country": None, "count": 0}
+        ctx.buy_ctx[uid] = {"count": 0}
         ctx.user_state[uid] = {"state": "buy_bulk_count"}
 
         await edit_or_send(
@@ -156,18 +141,15 @@ def register(ctx):
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "📦 ОПТОВАЯ ЗАКУПКА\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "🔢 Сколько номеров купить? (1–100)",
+            "🔢 Сколько номеров купить? (1–100)\n\n"
+            "💳 Списание пойдёт с баланса «Для покупки аккаунтов».\n"
+            "🚫 Лоты со спамблоком будут пропущены.",
             kbd.buy_back(),
         )
 
     @bot.callback_query_handler(func=lambda c: c.data == "buy_import")
     @admin_required
     async def cb_buy_import(call: types.CallbackQuery):
-        """
-        Запускает импорт уже купленных лотов с LZT.
-
-        :param call: callback_query от кнопки "📥 ИМПОРТ ПОКУПОК LZT".
-        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
 
@@ -192,44 +174,10 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "buy_stop")
     @admin_required
     async def cb_buy_stop(call: types.CallbackQuery):
-        """
-        Останавливает текущую покупку.
-
-        :param call: callback_query от кнопки "⛔ СТОП".
-        """
         await bot.answer_callback_query(call.id, "⏹ Останавливаю...")
         ctx.buy_cancel[call.from_user.id] = True
 
-    async def state_buy_country(message, state):
-        """
-        FSM-обработчик ввода страны для покупки.
-
-        :param message: объект Message с названием страны.
-        :param state: текущее FSM-состояние пользователя.
-        """
-        uid = message.from_user.id
-        country = (message.text or "").strip()
-        if len(country) < 2:
-            await bot.send_message(message.chat.id, "❌ Слишком короткое")
-            return
-
-        ctx.buy_ctx.setdefault(uid, {})["country"] = country
-        ctx.user_state[uid] = {"state": "buy_price"}
-
-        await bot.send_message(
-            message.chat.id,
-            f"🌍 Страна: {country}\n\n"
-            "💰 Введите максимальную цену в ₽:",
-            reply_markup=kbd.buy_back(),
-        )
-
     async def state_buy_price(message, state):
-        """
-        FSM-обработчик ввода максимальной цены.
-
-        :param message: объект Message с ценой.
-        :param state: текущее FSM-состояние пользователя.
-        """
         uid = message.from_user.id
         try:
             max_price = float((message.text or "").strip().replace(",", "."))
@@ -239,17 +187,10 @@ def register(ctx):
             await bot.send_message(message.chat.id, "❌ Введите число")
             return
 
-        country = ctx.buy_ctx.get(uid, {}).get("country")
         ctx.user_state.pop(uid, None)
-        await _run_single_buy(message.chat.id, uid, max_price, country)
+        await _run_single_buy(message.chat.id, uid, max_price)
 
     async def state_buy_bulk_count(message, state):
-        """
-        FSM-обработчик ввода количества для опта.
-
-        :param message: объект Message с количеством.
-        :param state: текущее FSM-состояние пользователя.
-        """
         uid = message.from_user.id
         raw = (message.text or "").strip()
         if not raw.isdigit() or not (1 <= int(raw) <= 100):
@@ -267,12 +208,6 @@ def register(ctx):
         )
 
     async def state_buy_bulk_price(message, state):
-        """
-        FSM-обработчик ввода максимальной цены для опта.
-
-        :param message: объект Message с ценой.
-        :param state: текущее FSM-состояние пользователя.
-        """
         uid = message.from_user.id
         try:
             max_price = float((message.text or "").strip().replace(",", "."))
@@ -286,62 +221,135 @@ def register(ctx):
         ctx.user_state.pop(uid, None)
         await _run_bulk_buy(message.chat.id, uid, count, max_price)
 
+    async def state_buy_email_code(message, state):
+        uid = message.from_user.id
+        fut = _EMAIL_WAITERS.get(uid)
+        if fut is None or fut.done():
+            await bot.send_message(message.chat.id,
+                                   "ℹ️ Сейчас код не ожидается.")
+            return
+        fut.set_result((message.text or "").strip())
+
     if not hasattr(ctx, "_buy_state_handlers"):
         ctx._buy_state_handlers = {}
     ctx._buy_state_handlers.update({
-        "buy_country": state_buy_country,
         "buy_price": state_buy_price,
         "buy_bulk_count": state_buy_bulk_count,
         "buy_bulk_price": state_buy_bulk_price,
+        "buy_email_code": state_buy_email_code,
     })
+
+    async def _bind_email_interactive(chat_id, uid, phone, session_str):
+        """
+        Привязывает почту через чат: запрашивает код, ждёт его от
+        пользователя и подтверждает. Возвращает (ok, msg, session_str).
+        """
+        if not LOGIN_EMAIL_SHOWN:
+            return False, "LOGIN_EMAIL не задан", session_str
+
+        ok, msg, bind_ctx, length = await lzt.request_bind_email(
+            phone, session_str)
+        if not ok:
+            return False, msg, session_str
+
+        fut = asyncio.get_running_loop().create_future()
+        _EMAIL_WAITERS[uid] = fut
+        ctx.user_state[uid] = {"state": "buy_email_code"}
+
+        setup_note = ""
+        if isinstance(bind_ctx, dict) and bind_ctx.get("mode") == "setup":
+            setup_note = (
+                "\nℹ️ У аккаунта ещё не было почты для входа, поэтому "
+                "Telegram также отправил служебный код входа В САМ "
+                "АККАУНТ — его вводить не нужно, жди именно код из "
+                "письма на email.\n"
+            )
+
+        await bot.send_message(
+            chat_id,
+            "📧 ПРИВЯЗКА ПОЧТЫ\n\n"
+            f"📞 Номер: {phone}\n"
+            f"📧 Email: {LOGIN_EMAIL_SHOWN}\n"
+            f"{setup_note}\n"
+            f"Введи {length}-значный код из письма.\n"
+            "Чтобы пропустить привязку — отправь «-».",
+        )
+        try:
+            code = await asyncio.wait_for(fut, timeout=EMAIL_CODE_WAIT)
+        except asyncio.TimeoutError:
+            code = None
+        finally:
+            _EMAIL_WAITERS.pop(uid, None)
+            ctx.user_state.pop(uid, None)
+
+        if not code or code == "-":
+            await bot.send_message(
+                chat_id, f"⏭ Почта для {phone} не привязана (пропущено).")
+            return False, "пропущено", session_str
+
+        ok, msg, new_session = await lzt.confirm_bind_email(
+            phone, session_str, bind_ctx, code)
+        if ok:
+            await bot.send_message(
+                chat_id, f"✅ Почта {LOGIN_EMAIL_SHOWN} привязана к {phone}.")
+            return True, "OK", new_session
+        await bot.send_message(
+            chat_id, f"❌ Почта для {phone} не привязана: {msg}")
+        return False, msg, session_str
 
     async def _save_bought(phone, session_str, two_fa, price,
                            item_country, item_id):
         """
-        Сохраняет купленный аккаунт в БД и записывает LZT-покупку.
+        Сохраняет купленный аккаунт в БД.
 
-        :param phone: номер телефона.
-        :param session_str: строка сессии.
-        :param two_fa: пароль 2FA (если есть).
-        :param price: цена в рублях.
-        :param item_country: страна лота.
-        :param item_id: ID лота LZT.
-        :return: объект Account при успехе, иначе None.
+        Регистрация в lzt_purchases (status='bought') выполняется здесь же
+        и НЕ глушится: если запись падает, пишем в лог error. Это гарантия,
+        что даже при сбое add_account запись о покупке останется.
         """
         phone = fmt_phone(phone)
+        safe_country = _safe_country(item_country)
+        int_price = int(price or 0)
 
-        try:
-            db.add_lzt_purchase(
-                item_id=item_id, phone=phone, price=int(price or 0),
-                country=item_country or "", status="bought",
-            )
-        except Exception as e:
-            logger.warning(f"[buy.db] add_lzt_purchase: {e}")
+        # 1. Регистрируем покупку сразу — до любых других операций.
+        _log_lzt_purchase(
+            item_id=item_id, phone=phone, price=int_price,
+            country=safe_country, status="bought",
+        )
 
+        # 2. Пытаемся сохранить сам аккаунт.
         try:
             db.add_account(
                 phone, session_str, two_fa or "",
                 name=phone,
                 country_code=get_country_code(phone),
-                price=int(price or 0),
+                price=int_price,
                 bought_from="lzt",
                 lzt_item_id=item_id,
             )
         except Exception as e:
             logger.error(f"[buy.db] add_account: {type(e).__name__}: {e}")
             try:
-                db.update_lzt_purchase(item_id, "failed", error=str(e)[:200])
-            except Exception:
-                pass
+                db.update_lzt_purchase(item_id, "failed",
+                                       phone=phone, error=str(e)[:200])
+            except Exception as e2:
+                logger.error(
+                    f"[buy.db] update_lzt_purchase({item_id}) failed: "
+                    f"{type(e2).__name__}: {e2}"
+                )
             return None
 
         acc = db.get_account_by_phone(phone)
         if not acc:
+            logger.error(f"[buy.db] {phone}: аккаунт не найден после add")
             try:
                 db.update_lzt_purchase(item_id, "failed",
+                                       phone=phone,
                                        error="account not in db")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(
+                    f"[buy.db] update_lzt_purchase({item_id}) failed: "
+                    f"{type(e).__name__}: {e}"
+                )
             return None
 
         if ctx.schedule_auto_clean:
@@ -352,39 +360,61 @@ def register(ctx):
 
         try:
             db.update_lzt_purchase(item_id, "logged_in", phone=phone)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(
+                f"[buy.db] update_lzt_purchase({item_id}, logged_in): "
+                f"{type(e).__name__}: {e}"
+            )
 
         db.stat_added(1)
-        db.stat_bought_lzt(1, spent_rub=int(price or 0))
+        db.stat_bought_lzt(1, spent_rub=int_price)
         return acc
 
-    async def _run_single_buy(chat_id, uid, max_price, country):
-        """
-        Выполняет покупку одного лота.
-
-        Всё тело обёрнуто в общий таймаут 300 секунд. Поддерживает
-        отмену через ctx.buy_cancel и передаёт ctx_cancel в
-        retry_login_to_account — тот автоматически повторяет вход
-        при таймаутах / пустых ответах LZT.
-
-        :param chat_id: ID чата для отправки прогресса.
-        :param uid: Telegram ID админа.
-        :param max_price: максимальная цена в рублях.
-        :param country: страна (или None — любая).
-        """
+    async def _run_single_buy(chat_id, uid, max_price):
         ctx.buy_cancel[uid] = False
+
         msg = await bot.send_message(
             chat_id,
             "⏳ Покупка...\n\n"
             f"💰 до {max_price} ₽\n"
-            f"🌍 {country or 'любая страна'}",
+            f"🌍 любая страна\n"
+            f"📄 Сканирую до 50 страниц LZT\n"
+            f"🚫 Пропускаю спамблок",
             reply_markup=kbd.buy_stop_kb(),
         )
 
         async def _worker():
             market = lzt.make_market()
-            balance, balance_id = await lzt.get_balance(market)
+            balance, balance_id = await lzt.get_balance_with_retry(market)
+
+            if balance_id is None:
+                await safe_edit(
+                    bot, chat_id, msg.message_id,
+                    "❌ ПОКУПКА НЕ ЗАПУЩЕНА\n\n"
+                    "Не удалось определить счёт для покупок: "
+                    "LZT не ответил после 3 попыток.\n\n"
+                    "Покупка остановлена, чтобы деньги не ушли "
+                    "с основного баланса. Попробуйте позже.",
+                    kbd.back_main(),
+                )
+                return
+
+            balance_line = (
+                f"💳 Счёт для покупок: {balance:.2f} ₽"
+                if balance is not None
+                else "💳 Счёт для покупок найден"
+            )
+
+            await safe_edit(
+                bot, chat_id, msg.message_id,
+                "⏳ Покупка...\n\n"
+                f"💰 до {max_price} ₽\n"
+                f"🌍 любая страна\n"
+                f"{balance_line}\n"
+                f"📄 Сканирую до 50 страниц LZT\n"
+                f"🚫 Пропускаю спамблок",
+                kbd.buy_stop_kb(),
+            )
 
             if balance is not None and balance < 1:
                 await safe_edit(
@@ -401,14 +431,22 @@ def register(ctx):
                 attempts += 1
 
                 ok, item_id, phone, price, item_country, login_data, err = \
-                    await lzt.buy_one(market, max_price, balance_id, balance,
-                                      skip_ids=skip_ids, country=country)
+                    await lzt.buy_one(
+                        market, max_price,
+                        balance_id=balance_id,
+                        skip_ids=skip_ids,
+                    )
 
                 if not ok:
-                    if err == "no_money":
+                    if err == "only_spam":
                         await safe_edit(
                             bot, chat_id, msg.message_id,
-                            "💸 Кончились деньги на LZT",
+                            "🚫 ВСЕ НАЙДЕННЫЕ ЛОТЫ — СПАМБЛОК\n\n"
+                            f"💰 до {max_price} ₽\n\n"
+                            "Просмотрено до 50 страниц LZT —\n"
+                            "все лоты помечены спамблоком.\n"
+                            "💡 Попробуйте увеличить цену — "
+                            "чистые аккаунты обычно дороже.",
                             kbd.back_main(),
                         )
                         return
@@ -416,20 +454,39 @@ def register(ctx):
                         await safe_edit(
                             bot, chat_id, msg.message_id,
                             "📭 Лоты не найдены\n\n"
-                            f"💰 до {max_price} ₽\n"
-                            f"🌍 {country or 'любая'}",
+                            f"💰 до {max_price} ₽\n\n"
+                            "Просмотрено до 50 страниц LZT — "
+                            "подходящих лотов нет.\n"
+                            "💡 Попробуйте увеличить цену.",
                             kbd.back_main(),
                         )
                         return
                     await asyncio.sleep(lzt.BUY_DELAY)
                     continue
 
+                # Лот куплен — фиксируем в UI
+                country_ru_label = (
+                    country_ru(item_country) if item_country else "—"
+                )
                 await safe_edit(
                     bot, chat_id, msg.message_id,
                     f"✅ Куплен лот {item_id} за {price} ₽\n"
+                    f"🌍 {country_ru_label}\n"
                     f"📞 {phone or '?'}\n\n⏳ Вход в аккаунт...",
                     kbd.buy_stop_kb(),
                 )
+
+                # Если номер не извлёкся — фиксируем покупку без телефона
+                if not phone:
+                    _log_lzt_purchase(
+                        item_id=item_id, phone=None, price=price,
+                        country=item_country, status="failed",
+                        error="phone_not_found",
+                    )
+                    skip_ids.add(item_id)
+                    continue
+
+                phone = fmt_phone(phone)
 
                 password = None
                 for key in ("telegram_password", "password", "twofa", "2fa",
@@ -438,12 +495,6 @@ def register(ctx):
                     if v:
                         password = str(v)
                         break
-
-                if not phone:
-                    skip_ids.add(item_id)
-                    continue
-
-                phone = fmt_phone(phone)
 
                 def _is_cancelled():
                     return ctx.buy_cancel.get(uid, False)
@@ -454,53 +505,32 @@ def register(ctx):
                 )
 
                 if not session_str:
+                    # ▼▼▼ ГЛАВНОЕ ИСПРАВЛЕНИЕ ▼▼▼
+                    # Регистрируем покупку ДО любых early-return, включая
+                    # отмену. Иначе купленный лот не появляется в LZT-логах.
+                    _log_lzt_purchase(
+                        item_id=item_id, phone=phone, price=price,
+                        country=item_country, status="failed",
+                        error=status,
+                    )
+
                     if status == "cancelled":
                         await safe_edit(
                             bot, chat_id, msg.message_id,
                             "⏹ Покупка отменена пользователем.\n\n"
                             f"🆔 Лот: {item_id}\n"
                             f"📞 {phone}\n\n"
-                            "Аккаунт не сохранён. Если лот куплен, "
-                            "его можно забрать через «📥 LZT-ЛОГИ».",
+                            "Аккаунт не сохранён, но лот уже куплен — "
+                            "он в «📥 LZT-ЛОГИ» со статусом 🔴. "
+                            "Вход можно повторить оттуда.",
                             kbd.back_main(),
                         )
                         return
 
-                    if status in ("timeout",) or status.startswith("error:"):
-                        try:
-                            db.add_lzt_purchase(
-                                item_id=item_id, phone=phone,
-                                price=int(price or 0),
-                                country=item_country or "",
-                                status="failed", error=status,
-                            )
-                        except Exception:
-                            pass
-                        await bot.send_message(
-                            chat_id,
-                            f"⏱️ Лот {item_id} куплен за {price} ₽, "
-                            f"но вход не завершён после двух попыток "
-                            f"({status}).\n\n"
-                            f"📞 {phone}\n\n"
-                            f"💡 {lzt_error_hint(status)}\n\n"
-                            "Попробуй через «📥 LZT-ЛОГИ» → "
-                            "«🔁 Повторить вход».",
-                        )
-                        skip_ids.add(item_id)
-                        continue
-
-                    try:
-                        db.add_lzt_purchase(
-                            item_id=item_id, phone=phone,
-                            price=int(price or 0),
-                            country=item_country or "",
-                            status="failed", error=status,
-                        )
-                    except Exception:
-                        pass
                     await bot.send_message(
                         chat_id,
                         f"⚠️ Лот {item_id} куплен, но вход: {status}\n\n"
+                        f"📞 {phone}\n\n"
                         f"💡 {lzt_error_hint(status)}\n\n"
                         "Попробуй через «📥 LZT-ЛОГИ» → "
                         "«🔁 Повторить вход».",
@@ -508,8 +538,38 @@ def register(ctx):
                     skip_ids.add(item_id)
                     continue
 
+                new_session, new_pw, ok2fa, msg2fa = \
+                    await lzt.apply_password_2fa_after_login(
+                        phone, session_str, password or "",
+                    )
+                if ok2fa:
+                    session_str = new_session
+                    password = new_pw
+                    if msg2fa == "OK":
+                        logger.info(f"[buy.single] {phone}: 2FA → PASSWORD_2FA")
+                else:
+                    logger.warning(
+                        f"[buy.single] {phone}: 2FA не изменён: {msg2fa}"
+                    )
+
+                email_ok, email_msg, session_str = \
+                    await _bind_email_interactive(
+                        chat_id, uid, phone, session_str)
+                logger.info(f"[buy.single] {phone}: почта: {email_msg}")
+
                 acc = await _save_bought(phone, session_str, password,
                                          price, item_country, item_id)
+
+                if acc:
+                    try:
+                        db.log_action(
+                            uid, "buy_single",
+                            details=f"{phone} {price}₽ item={item_id} "
+                                    f"balance_id={balance_id}",
+                            account_id=acc.id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[buy.single] log_action: {e}")
 
                 text = (
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -517,26 +577,23 @@ def register(ctx):
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                     f"🏷 Название: {phone}\n"
                     f"📞 Номер:    {phone}\n"
-                    f"🌍 Страна:   {item_country or '—'}\n"
+                    f"🌍 Страна:   {country_ru_label}\n"
                     f"💰 Цена:     {price} ₽\n"
                     + (f"🔐 2FA:      {password}\n" if password else "")
+                    + (f"📧 Почта:   ✅ {LOGIN_EMAIL_SHOWN}\n"
+                       if email_ok else f"📧 Почта:   ⚠️ {email_msg}\n")
                     + f"🆔 Лот:      {item_id}\n"
                     "📌 Статус:   ⚠️ Ожидает очистки"
                 )
                 await safe_edit(bot, chat_id, msg.message_id, text,
                                 kbd.buy_after())
-                db.log_action(
-                    uid, "buy_single",
-                    details=f"{phone} {price}₽ item={item_id}",
-                    account_id=acc.id if acc else None,
-                )
                 return
 
             await safe_edit(bot, chat_id, msg.message_id,
                             "⏹ Остановлено", kbd.back_main())
 
         try:
-            await asyncio.wait_for(_worker(), timeout=300)
+            await asyncio.wait_for(_worker(), timeout=900)
         except asyncio.TimeoutError:
             await safe_edit(
                 bot, chat_id, msg.message_id,
@@ -554,23 +611,14 @@ def register(ctx):
             ctx.buy_cancel.pop(uid, None)
 
     async def _run_bulk_buy(chat_id, uid, count, max_price):
-        """
-        Выполняет оптовую закупку нескольких лотов.
-
-        Покупает до count лотов по цене не выше max_price. Показывает
-        прогресс, поддерживает отмену. Собирает список успехов и
-        ошибок в отчёт.
-
-        :param chat_id: ID чата.
-        :param uid: Telegram ID админа.
-        :param count: сколько лотов купить.
-        :param max_price: максимальная цена за штуку.
-        """
         ctx.buy_cancel[uid] = False
+
         msg = await bot.send_message(
             chat_id,
             "⏳ Оптовая покупка...\n\n"
-            f"📦 {count} шт. по {max_price} ₽",
+            f"📦 {count} шт. по {max_price} ₽\n"
+            f"📄 Сканирую до 50 страниц LZT\n"
+            f"🚫 Пропускаю спамблок",
             reply_markup=kbd.buy_stop_kb(),
         )
 
@@ -581,12 +629,30 @@ def register(ctx):
 
         try:
             market = lzt.make_market()
-            balance, balance_id = await lzt.get_balance(market)
+            balance, balance_id = await lzt.get_balance_with_retry(market)
+
+            if balance_id is None:
+                await safe_edit(
+                    bot, chat_id, msg.message_id,
+                    "❌ ОПТОВАЯ ПОКУПКА НЕ ЗАПУЩЕНА\n\n"
+                    "Не удалось определить счёт для покупок: "
+                    "LZT не ответил после 3 попыток.\n\n"
+                    "Покупка остановлена, чтобы деньги не ушли "
+                    "с основного баланса. Попробуйте позже.",
+                    kbd.back_main(),
+                )
+                return
+
+            logger.info(
+                f"[buy.bulk] используем balance_id={balance_id} "
+                f"({balance} ₽)"
+            )
 
             if balance is not None and balance < max_price:
                 await safe_edit(
                     bot, chat_id, msg.message_id,
-                    f"❌ Мало средств: {balance:.2f} ₽",
+                    f"❌ Мало средств на счёте для покупок: "
+                    f"{balance:.2f} ₽ (нужно минимум {max_price:.2f} ₽)",
                     kbd.back_main(),
                 )
                 return
@@ -595,27 +661,37 @@ def register(ctx):
                    and not ctx.buy_cancel.get(uid)):
                 attempts += 1
 
+                balance_str = (
+                    f"\n\n💳 Счёт для покупок: {balance:.2f} ₽"
+                    if balance is not None else ""
+                )
                 await safe_edit(
                     bot, chat_id, msg.message_id,
                     "📦 ОПТОВАЯ ПОКУПКА\n\n"
                     f"✅ Куплено: {ok_count}/{count}\n"
                     f"❌ Ошибок:  {fail_count}\n"
                     f"🔁 Попытка: {attempts}/{max_attempts}"
-                    + (f"\n\n💰 Баланс: {balance:.2f} ₽"
-                       if balance else ""),
+                    f"{balance_str}",
                     kbd.buy_stop_kb(),
                 )
 
                 ok, item_id, phone, price, item_country, login_data, err = \
-                    await lzt.buy_one(market, max_price, balance_id, balance,
-                                      skip_ids=skip_ids)
+                    await lzt.buy_one(
+                        market, max_price,
+                        balance_id=balance_id,
+                        skip_ids=skip_ids,
+                    )
 
                 if not ok:
-                    if err == "no_money":
-                        report.append("💸 кончились деньги")
-                        break
                     if err == "no_lots":
-                        report.append("📭 лоты закончились")
+                        report.append(
+                            "📭 лоты закончились (просмотрено 50 страниц)"
+                        )
+                        break
+                    if err == "only_spam":
+                        report.append(
+                            "🚫 остались только лоты со спамблоком"
+                        )
                         break
                     fail_count += 1
                     await asyncio.sleep(lzt.BUY_DELAY)
@@ -627,6 +703,18 @@ def register(ctx):
                 elif balance is not None:
                     balance -= float(price or 0) * 1.03
 
+                if not phone:
+                    _log_lzt_purchase(
+                        item_id=item_id, phone=None, price=price,
+                        country=item_country, status="failed",
+                        error="phone_not_found",
+                    )
+                    skip_ids.add(item_id)
+                    fail_count += 1
+                    continue
+
+                phone = fmt_phone(phone)
+
                 password = None
                 for key in ("telegram_password", "password", "twofa", "2fa",
                             "two_fa", "cloud_password"):
@@ -634,13 +722,6 @@ def register(ctx):
                     if v:
                         password = str(v)
                         break
-
-                if not phone:
-                    skip_ids.add(item_id)
-                    fail_count += 1
-                    continue
-
-                phone = fmt_phone(phone)
 
                 def _is_cancelled():
                     return ctx.buy_cancel.get(uid, False)
@@ -653,25 +734,59 @@ def register(ctx):
                 if not session_str:
                     fail_count += 1
                     skip_ids.add(item_id)
-                    report.append(f"⚠️ {phone} — {status}")
-                    try:
-                        db.add_lzt_purchase(
-                            item_id=item_id, phone=phone,
-                            price=int(price or 0),
-                            country=item_country or "",
-                            status="failed", error=status,
-                        )
-                    except Exception:
-                        pass
+                    country_ru_label = (
+                        country_ru(item_country) if item_country else "—"
+                    )
+                    report.append(
+                        f"⚠️ {phone} ({country_ru_label}) — {status}"
+                    )
+                    _log_lzt_purchase(
+                        item_id=item_id, phone=phone, price=price,
+                        country=item_country, status="failed",
+                        error=status,
+                    )
                     if status == "cancelled":
                         break
                     continue
+
+                new_session, new_pw, ok2fa, msg2fa = \
+                    await lzt.apply_password_2fa_after_login(
+                        phone, session_str, password or "",
+                    )
+                if ok2fa:
+                    session_str = new_session
+                    password = new_pw
+                    if msg2fa == "OK":
+                        logger.info(f"[buy.bulk] {phone}: 2FA → PASSWORD_2FA")
+                else:
+                    logger.warning(
+                        f"[buy.bulk] {phone}: 2FA не изменён: {msg2fa}"
+                    )
+
+                email_ok, email_msg, session_str = \
+                    await _bind_email_interactive(
+                        chat_id, uid, phone, session_str)
+                logger.info(f"[buy.bulk] {phone}: почта: {email_msg}")
 
                 acc = await _save_bought(phone, session_str, password,
                                          price, item_country, item_id)
                 if acc:
                     ok_count += 1
-                    report.append(f"✅ {phone} — {price} ₽")
+                    country_ru_label = (
+                        country_ru(item_country) if item_country else "—"
+                    )
+                    report.append(
+                        f"✅ {phone} ({country_ru_label}) — {price} ₽ · 📧 {'да' if email_ok else email_msg}"
+                    )
+                    try:
+                        db.log_action(
+                            uid, "buy_bulk",
+                            details=f"{phone} {price}₽ item={item_id} "
+                                    f"balance_id={balance_id}",
+                            account_id=acc.id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[buy.bulk] log_action: {e}")
                 else:
                     fail_count += 1
 
@@ -688,8 +803,9 @@ def register(ctx):
                 f"❌ Ошибок:  {fail_count}\n\n"
                 "Детали:\n" + "\n".join(report[:15])
             )
-            db.log_action(uid, "buy_bulk",
-                          details=f"ok={ok_count} fail={fail_count}")
+            db.log_action(uid, "buy_bulk_summary",
+                          details=f"ok={ok_count} fail={fail_count} "
+                                  f"balance_id={balance_id}")
             await safe_edit(bot, chat_id, msg.message_id, text,
                             kbd.back_main())
 
@@ -702,13 +818,6 @@ def register(ctx):
             ctx.buy_cancel.pop(uid, None)
 
     async def _import_purchases(chat_id, msg_id, uid):
-        """
-        Импортирует уже купленные лоты LZT в хранилище.
-
-        :param chat_id: ID чата.
-        :param msg_id: ID сообщения для редактирования.
-        :param uid: Telegram ID админа.
-        """
         ctx.buy_cancel[uid] = False
 
         try:
@@ -774,17 +883,23 @@ def register(ctx):
 
                 if not phone:
                     fail_count += 1
-                    try:
-                        db.add_lzt_purchase(
-                            item_id=item_id, phone=None, price=0,
-                            country=lzt.get_country(it),
-                            status="failed", error="phone_not_found",
-                        )
-                    except Exception:
-                        pass
+                    _log_lzt_purchase(
+                        item_id=item_id, phone=None, price=0,
+                        country=lzt.get_country(it), status="failed",
+                        error="phone_not_found",
+                    )
                     continue
 
                 if phone in known_phones:
+                    # Аккаунт уже в хранилище, но записи в lzt_purchases нет —
+                    # это значит, что предыдущий add_lzt_purchase когда-то
+                    # упал. Заводим запись как минимум со статусом bought,
+                    # чтобы лот не потерялся из LZT-логов.
+                    if item_id not in known_lzt_ids:
+                        _log_lzt_purchase(
+                            item_id=item_id, phone=phone, price=0,
+                            country=lzt.get_country(it), status="bought",
+                        )
                     continue
 
                 password = None
@@ -805,23 +920,43 @@ def register(ctx):
                 if not session_str:
                     fail_count += 1
                     report.append(f"⚠️ {phone} — {status}")
-                    try:
-                        db.add_lzt_purchase(
-                            item_id=item_id, phone=phone, price=0,
-                            country=lzt.get_country(it),
-                            status="failed", error=status,
-                        )
-                    except Exception:
-                        pass
+                    _log_lzt_purchase(
+                        item_id=item_id, phone=phone, price=0,
+                        country=lzt.get_country(it), status="failed",
+                        error=status,
+                    )
                     if status == "cancelled":
                         break
                     continue
+
+                new_session, new_pw, ok2fa, msg2fa = \
+                    await lzt.apply_password_2fa_after_login(
+                        phone, session_str, password or "",
+                    )
+                if ok2fa:
+                    session_str = new_session
+                    password = new_pw
+                    if msg2fa == "OK":
+                        logger.info(f"[buy.import] {phone}: 2FA → PASSWORD_2FA")
+                else:
+                    logger.warning(
+                        f"[buy.import] {phone}: 2FA не изменён: {msg2fa}"
+                    )
 
                 acc = await _save_bought(phone, session_str, password,
                                          0, lzt.get_country(it), item_id)
                 if acc:
                     ok_count += 1
-                    report.append(f"✅ {phone}")
+                    country_ru_label = country_ru(lzt.get_country(it)) or "—"
+                    report.append(f"✅ {phone} ({country_ru_label})")
+                    try:
+                        db.log_action(
+                            uid, "import",
+                            details=f"{phone} item={item_id}",
+                            account_id=acc.id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[buy.import] log_action: {e}")
                 else:
                     fail_count += 1
 
@@ -833,7 +968,7 @@ def register(ctx):
                 f"❌ Не удалось: {fail_count}\n\n"
                 + "\n".join(report[:15])
             )
-            db.log_action(uid, "import",
+            db.log_action(uid, "import_summary",
                           details=f"ok={ok_count} fail={fail_count}")
             await safe_edit(bot, chat_id, msg_id, text, kbd.back_main())
 

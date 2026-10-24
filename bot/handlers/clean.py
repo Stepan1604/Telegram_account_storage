@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from datetime import datetime
 
 from telebot import types
@@ -21,38 +22,29 @@ from config import ADMIN_ID, AUTO_CLEAN_DELAY
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 5
+# Интервал между автоочистками, которые просрочены при старте бота (сек.)
+AUTO_CLEAN_STAGGER = 60
+# Сколько автоочисток могут выполняться одновременно
+AUTO_CLEAN_CONCURRENCY = 2
 
 
 def register(ctx):
-    """
-    Регистрирует хендлеры очистки, проверки и автоочистки аккаунтов.
-
-    Включает: автоочистку через AUTO_CLEAN_DELAY после добавления,
-    прогрев сессий при старте бота, массовую и одиночную очистку
-    сессий и чатов, проверку живости аккаунтов и удаление мёртвых.
-
-    :param ctx: объект Context с общим состоянием.
-    """
     bot = ctx.bot
+    clean_sem = asyncio.Semaphore(AUTO_CLEAN_CONCURRENCY)
 
     async def _auto_clean_after(account_id: int, delay: float):
-        """
-        Автоочистка одного аккаунта через заданную задержку.
-
-        Спит delay секунд, затем делает ResetAuthorizations и чистит
-        диалоги. При успехе помечает аккаунт cleaned и уведомляет
-        админа. При ошибке FROZEN помечает dead.
-
-        :param account_id: ID аккаунта в БД.
-        :param delay: задержка в секундах.
-        """
         try:
             await asyncio.sleep(delay)
             acc = db.get_account(account_id)
             if not acc or acc.status != "uncleaned":
                 return
 
-            ok, msg = await reset_other_sessions(acc.session, acc.phone)
+            t0 = time.perf_counter()
+            async with clean_sem:
+                ok, msg = await reset_other_sessions(acc.session, acc.phone)
+            logger.info(f"[auto_clean] {acc.phone}: "
+                        f"{time.perf_counter() - t0:.1f} с, "
+                        f"{'ok' if ok else msg}")
 
             if ok:
                 db.mark_cleaned(account_id)
@@ -96,15 +88,6 @@ def register(ctx):
             ctx.auto_clean_tasks.pop(account_id, None)
 
     def schedule_auto_clean(account_id: int, delay: float = AUTO_CLEAN_DELAY):
-        """
-        Планирует автоочистку аккаунта.
-
-        Создаёт asyncio-задачу и сохраняет её в ctx.auto_clean_tasks.
-        Если задача для этого аккаунта уже есть — ничего не делает.
-
-        :param account_id: ID аккаунта в БД.
-        :param delay: задержка в секундах перед очисткой.
-        """
         if account_id in ctx.auto_clean_tasks:
             return
         task = asyncio.create_task(_auto_clean_after(account_id, delay))
@@ -113,21 +96,18 @@ def register(ctx):
     ctx.schedule_auto_clean = schedule_auto_clean
 
     async def _restore_auto_clean():
-        """
-        Восстанавливает таймеры автоочистки при старте бота.
-
-        Проходит по всем uncleaned-аккаунтам и планирует автоочистку:
-        либо с задержкой 1 сек (если время уже прошло), либо с
-        оставшимся временем.
-        """
         try:
             now = datetime.now()
+            overdue = 0
             for acc in db.get_accounts():
                 if acc.status != "uncleaned" or not acc.registered_at:
                     continue
                 elapsed = (now - acc.registered_at).total_seconds()
                 if elapsed >= AUTO_CLEAN_DELAY:
-                    schedule_auto_clean(acc.id, 1)
+                    # не все сразу: разносим по времени
+                    schedule_auto_clean(
+                        acc.id, 1 + overdue * AUTO_CLEAN_STAGGER)
+                    overdue += 1
                 else:
                     schedule_auto_clean(acc.id, AUTO_CLEAN_DELAY - elapsed)
         except Exception as e:
@@ -140,13 +120,6 @@ def register(ctx):
         logger.warning(f"[clean] restore schedule: {e}")
 
     async def _warmup_sessions():
-        """
-        Прогревает все сессии аккаунтов при старте бота.
-
-        Подключается к каждому аккаунту, проверяет авторизацию и
-        обновляет last_checked_at. Показывает прогресс в одном
-        сообщении админу. Между аккаунтами пауза 3 секунды.
-        """
         await asyncio.sleep(5)
         accounts = db.get_accounts()
 
@@ -180,13 +153,6 @@ def register(ctx):
         detail = []
 
         for i, acc in enumerate(accounts, 1):
-            # Показываем, какой аккаунт СЕЙЧАС начинаем обрабатывать,
-            # ДО подключения к нему — раньше это сообщение обновлялось
-            # уже ПОСЛЕ обработки, и поле "Текущий" на самом деле
-            # указывало на только что завершённый номер, а не на
-            # следующий в очереди. Прогресс здесь — сколько аккаунтов
-            # уже полностью обработано (i - 1), "Текущий" — тот,
-            # который обрабатывается в этой итерации.
             if msg_id:
                 tail = "\n".join(detail[-5:]) if detail else "—"
                 await safe_edit(
@@ -228,7 +194,6 @@ def register(ctx):
                     await _safe_disconnect(c)
 
             detail.append(f"{icon} {name} ({acc.phone}) — {txt}")
-
             await asyncio.sleep(3)
 
         lines = "\n".join(detail)
@@ -262,19 +227,16 @@ def register(ctx):
 
     async def _check_all(chat_id: int, msg_id: int, accounts, uid: int):
         """
-        Проверяет живость всех аккаунтов.
+        Проверяет сессии всех аккаунтов.
 
-        Проходит по списку, вызывает is_alive для каждого, обновляет
-        last_checked_at и статус (если мёртв — dead). Показывает
-        прогресс в одном сообщении.
-
-        :param chat_id: ID чата для редактирования прогресса.
-        :param msg_id: ID сообщения для редактирования.
-        :param accounts: список аккаунтов для проверки.
-        :param uid: Telegram ID админа.
+        is_alive возвращает состояние строкой: "alive" / "dead" / "unknown".
+        "unknown" (таймаут, FloodWait, сетевая ошибка) НЕ считается мёртвым:
+        статус аккаунта не меняется, он попадает в отдельный счётчик.
         """
         total = len(accounts)
-        ok = dead = 0
+        ok = dead = unknown = 0
+        dead_lines = []
+        unknown_lines = []
 
         for i, acc in enumerate(accounts, 1):
             await safe_edit(
@@ -283,23 +245,51 @@ def register(ctx):
                 "🔍 ПРОВЕРКА АККАУНТОВ\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"📊 Прогресс: {i}/{total}\n\n"
-                f"✅ Живых:   {ok}\n❌ Мёртвых: {dead}\n\n"
+                f"✅ Живых:   {ok}\n❌ Мёртвых: {dead}\n"
+                f"❔ Не удалось проверить: {unknown}\n\n"
                 f"📞 Проверяю: {acc.phone}",
                 kbd.back_main(),
             )
 
-            alive, info = await is_alive(acc.session, acc.phone)
-            db.update_last_checked(acc.id, alive=alive)
+            state, info = await is_alive(acc.session, acc.phone)
+            name = acc.name or acc.phone
 
-            if alive:
+            if state == "alive":
                 ok += 1
+                db.update_last_checked(acc.id, alive=True)
                 if acc.status == "dead":
                     db.update_account_status(acc.id, "uncleaned")
-            else:
+                try:
+                    db.log_action(uid, "check", details="alive",
+                                  account_id=acc.id)
+                except Exception:
+                    pass
+
+            elif state == "dead":
                 dead += 1
+                dead_lines.append(f"{name} ({acc.phone}): {info}")
                 logger.warning(f"[check_all] {acc.phone}: мёртв — {info}")
+                db.update_last_checked(acc.id, alive=False)
                 db.update_account_status(acc.id, "dead")
                 db.stat_dead(1)
+                try:
+                    db.log_action(uid, "check",
+                                  details=f"dead: {info[:100]}",
+                                  account_id=acc.id)
+                except Exception:
+                    pass
+
+            else:
+                unknown += 1
+                unknown_lines.append(f"{name} ({acc.phone}): {info}")
+                logger.warning(
+                    f"[check_all] {acc.phone}: не удалось проверить — {info}")
+                try:
+                    db.log_action(uid, "check",
+                                  details=f"unknown: {info[:100]}",
+                                  account_id=acc.id)
+                except Exception:
+                    pass
 
         text = (
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -307,24 +297,28 @@ def register(ctx):
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"✅ Живых:   {ok}\n"
             f"❌ Мёртвых: {dead}\n"
+            f"❔ Не удалось проверить: {unknown}\n"
             f"📱 Всего:   {total}"
         )
-        db.log_action(uid, "check", details=f"ok={ok} dead={dead}")
+        if dead_lines:
+            text += "\n\n❌ Мёртвые:\n" + "\n".join(
+                f"• {l}" for l in dead_lines[:10])
+            if len(dead_lines) > 10:
+                text += f"\n… и ещё {len(dead_lines) - 10}"
+        if unknown_lines:
+            text += "\n\n❔ Не проверены (статус не менялся):\n" + "\n".join(
+                f"• {l}" for l in unknown_lines[:10])
+            if len(unknown_lines) > 10:
+                text += f"\n… и ещё {len(unknown_lines) - 10}"
+
+        db.log_action(uid, "check_summary",
+                      details=f"ok={ok} dead={dead} unknown={unknown}")
         await safe_edit(bot, chat_id, msg_id, text,
                         kbd.after_check(dead > 0))
 
     @bot.callback_query_handler(func=lambda c: c.data == "check_accounts")
     @admin_required
     async def cb_check(call: types.CallbackQuery):
-        """
-        Запускает проверку всех аккаунтов.
-
-        Если хранилище пусто — сообщает. Если уже идёт другая задача
-        у этого пользователя — предупреждает. Иначе создаёт фоновую
-        задачу _check_all.
-
-        :param call: callback_query от кнопки "🔍 ПРОВЕРКА АККАУНТОВ".
-        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
         accounts = db.get_accounts()
@@ -333,10 +327,7 @@ def register(ctx):
             await edit_or_send(bot, call, "📦 Хранилище пусто.",
                                kbd.back_main())
             return
-        # Явно сбрасываем предыдущую задачу перед запуском новой:
-        # set_running_task ниже тоже сам отменяет старую задачу, но
-        # делаем это заранее, чтобы прогресс-сообщение гарантированно
-        # перезапускалось с чистого состояния.
+
         old = ctx.running_tasks.get(uid)
         if old is not None and not old.done():
             old.cancel()
@@ -349,18 +340,6 @@ def register(ctx):
         ctx.set_running_task(uid, task)
 
     async def _clean_all(chat_id: int, msg_id: int, accounts, uid: int):
-        """
-        Массовая очистка uncleaned-аккаунтов.
-
-        Для каждого: отменяет автоочистку, вызывает reset_other_sessions,
-        помечает cleaned. Поддерживает отмену через ctx.cancel_flags.
-        Показывает прогресс и список ошибок.
-
-        :param chat_id: ID чата.
-        :param msg_id: ID сообщения для редактирования.
-        :param accounts: список аккаунтов для очистки.
-        :param uid: Telegram ID админа.
-        """
         ctx.cancel_flags[uid] = False
         total = len(accounts)
         ok = fail = 0
@@ -395,9 +374,6 @@ def register(ctx):
             if task and not task.done():
                 task.cancel()
 
-            # Блокируем аккаунт на время обработки, чтобы исключить
-            # гонку с одиночной кнопкой "🧹 ОЧИСТИТЬ СЕССИИ" на карточке
-            # этого же аккаунта, если админ нажмёт её параллельно.
             locked = ctx.try_lock_account(acc.id)
             try:
                 s, msg = await reset_other_sessions(acc.session, acc.phone)
@@ -409,6 +385,11 @@ def register(ctx):
                 ok += 1
                 db.mark_cleaned(acc.id)
                 db.stat_cleaned(1)
+                try:
+                    db.log_action(uid, "clean_all", details="OK",
+                                  account_id=acc.id)
+                except Exception:
+                    pass
             elif msg == "FROZEN":
                 db.update_account_status(acc.id, "dead")
                 db.log_action(0, "frozen", details="clean_all",
@@ -420,6 +401,12 @@ def register(ctx):
                 fail += 1
                 name = acc.name or acc.phone
                 error_lines.append(f"{name} ({acc.phone}): {msg}")
+                try:
+                    db.log_action(uid, "clean_all",
+                                  details=f"fail: {msg[:100]}",
+                                  account_id=acc.id)
+                except Exception:
+                    pass
 
         ctx.cancel_flags.pop(uid, None)
         header = "⏹ ОЧИСТКА ОТМЕНЕНА" if cancelled else "📊 ОЧИСТКА ЗАВЕРШЕНА"
@@ -440,17 +427,13 @@ def register(ctx):
         else:
             text += "\nОшибки: —"
 
-        db.log_action(uid, "clean_all", details=f"ok={ok} fail={fail}")
+        db.log_action(uid, "clean_all_summary",
+                      details=f"ok={ok} fail={fail}")
         await safe_edit(bot, chat_id, msg_id, text, kbd.back_main())
 
     @bot.callback_query_handler(func=lambda c: c.data == "clean_sessions")
     @admin_required
     async def cb_clean(call: types.CallbackQuery):
-        """
-        Показывает подтверждение массовой очистки uncleaned-аккаунтов.
-
-        :param call: callback_query от кнопки "🧹 ОЧИСТИТЬ СЕССИИ".
-        """
         await bot.answer_callback_query(call.id)
         accounts = [a for a in db.get_accounts() if a.status == "uncleaned"]
 
@@ -481,11 +464,6 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "clean_confirm")
     @admin_required
     async def cb_clean_confirm(call: types.CallbackQuery):
-        """
-        Запускает массовую очистку после подтверждения.
-
-        :param call: callback_query от кнопки "✅ ДА, ОЧИСТИТЬ".
-        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
         accounts = [a for a in db.get_accounts() if a.status == "uncleaned"]
@@ -493,8 +471,7 @@ def register(ctx):
         if not accounts:
             await edit_or_send(bot, call, "✅ Нечего", kbd.back_main())
             return
-        # Сбрасываем предыдущую задачу (если есть завершённая — убираем
-        # запись, если идёт — отменяем), чтобы можно было перезапустить.
+
         old = ctx.running_tasks.get(uid)
         if old is not None and not old.done():
             old.cancel()
@@ -509,11 +486,6 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "clean_cancel")
     @admin_required
     async def cb_clean_cancel(call: types.CallbackQuery):
-        """
-        Отменяет текущую массовую очистку.
-
-        :param call: callback_query от кнопки "⏹ ОТМЕНИТЬ ОЧИСТКУ".
-        """
         ctx.cancel_flags[call.from_user.id] = True
         await bot.answer_callback_query(call.id, "⏹ Отмена...",
                                         show_alert=False)
@@ -523,21 +495,6 @@ def register(ctx):
     )
     @admin_required
     async def cb_acc_clean(call: types.CallbackQuery):
-        """
-        Очищает один аккаунт: сессии + чаты.
-
-        Вызывает reset_other_sessions. При FROZEN помечает dead.
-        Отменяет автоочистку для этого аккаунта.
-
-        Защищена от повторного запуска: если очистка этого же
-        аккаунта уже выполняется (например, при двойном нажатии
-        кнопки), второй запрос просто показывает предупреждение и
-        не стартует ещё один reset_other_sessions параллельно.
-
-        :param call: callback_query с data="acc_clean_{id}_{origin}",
-            где origin — токен навигации для кнопки "Назад" (не
-            обязательно число — см. kbd.account_card).
-        """
         try:
             _, _, acc_id, origin = call.data.split("_")
             acc_id = int(acc_id)
@@ -581,7 +538,8 @@ def register(ctx):
             if ok:
                 db.mark_cleaned(acc.id)
                 db.stat_cleaned(1)
-                db.log_action(uid, "clean", details=acc.phone, account_id=acc.id)
+                db.log_action(uid, "clean", details=acc.phone,
+                              account_id=acc.id)
                 text = (
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     "✅ ОЧИСТКА ЗАВЕРШЕНА\n"
@@ -605,6 +563,8 @@ def register(ctx):
                     "📌 Статус изменён на ❌ Мёртвый."
                 )
             else:
+                db.log_action(uid, "clean_fail",
+                              details=msg[:200], account_id=acc.id)
                 text = (
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     "❌ НЕ УДАЛОСЬ ОЧИСТИТЬ\n"
@@ -626,17 +586,6 @@ def register(ctx):
     )
     @admin_required
     async def cb_acc_clear_chats(call: types.CallbackQuery):
-        """
-        Очищает только чаты аккаунта (без сброса сессий).
-
-        Защищена той же блокировкой busy_accounts, что и cb_acc_clean —
-        очистка сессий и очистка только чатов используют одну и ту же
-        Telethon-сессию аккаунта, поэтому не должны выполняться
-        параллельно.
-
-        :param call: callback_query с
-            data="acc_clear_chats_{id}_{origin}".
-        """
         try:
             _, _, _, acc_id, origin = call.data.split("_")
             acc_id = int(acc_id)
@@ -711,6 +660,8 @@ def register(ctx):
                     "📌 Статус изменён на ❌ Мёртвый."
                 )
             else:
+                db.log_action(uid, "clear_chats_fail",
+                              details=msg[:200], account_id=acc.id)
                 text = (
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                     "❌ НЕ УДАЛОСЬ ОЧИСТИТЬ ЧАТЫ\n"
@@ -731,11 +682,6 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "del_dead")
     @admin_required
     async def cb_del_dead(call: types.CallbackQuery):
-        """
-        Показывает подтверждение удаления мёртвых аккаунтов.
-
-        :param call: callback_query от кнопки "🗑️ УДАЛИТЬ МЁРТВЫЕ".
-        """
         await bot.answer_callback_query(call.id)
         dead_accs = [a for a in db.get_accounts() if a.status == "dead"]
 
@@ -767,14 +713,6 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "del_dead_confirm")
     @admin_required
     async def cb_del_dead_confirm(call: types.CallbackQuery):
-        """
-        Удаляет все dead-аккаунты из БД и бэкапа.
-
-        Для каждого отменяет автоочистку, закрывает клиент и удаляет
-        запись через db.delete_account (полное удаление).
-
-        :param call: callback_query от кнопки "✅ УДАЛИТЬ N АККАУНТОВ".
-        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
         cnt = 0
@@ -787,12 +725,17 @@ def register(ctx):
                     if task and not task.done():
                         task.cancel()
                     await close_client(acc.phone)
+                    try:
+                        db.log_action(uid, "del_dead",
+                                      details=acc.phone, account_id=acc.id)
+                    except Exception:
+                        pass
                     db.delete_account(acc.id)
                     cnt += 1
                 except Exception as e:
                     errors.append(f"{acc.phone}: {e}")
 
-        db.log_action(uid, "del_dead", details=f"count={cnt}")
+        db.log_action(uid, "del_dead_summary", details=f"count={cnt}")
 
         text = (
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -813,11 +756,6 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "archive")
     @admin_required
     async def cb_archive(call: types.CallbackQuery):
-        """
-        Открывает раздел архива: список архивных аккаунтов и кнопку очистки.
-
-        :param call: callback_query от кнопки "🗄 АРХИВ".
-        """
         await bot.answer_callback_query(call.id)
         archived = db.get_archived_accounts()
 
@@ -848,13 +786,6 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "archive_clear")
     @admin_required
     async def cb_archive_clear(call: types.CallbackQuery):
-        """
-        Показывает подтверждение очистки архива.
-
-        Очистка необратима: аккаунты удаляются из БД и из бэкапа.
-
-        :param call: callback_query от кнопки "🗑 ОЧИСТИТЬ АРХИВ".
-        """
         await bot.answer_callback_query(call.id)
         archived = db.get_archived_accounts()
 
@@ -877,16 +808,6 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "archive_clear_yes")
     @admin_required
     async def cb_archive_clear_yes(call: types.CallbackQuery):
-        """
-        Окончательно удаляет все архивные аккаунты.
-
-        Каждый аккаунт сначала блокируется через ctx.try_lock_account,
-        чтобы не пересечься с одиночной операцией над ним (очистка,
-        проверка). Занятые аккаунты пропускаются и попадают в отчёт.
-        Номера всех удалённых пишутся в лог действий.
-
-        :param call: callback_query от кнопки "✅ УДАЛИТЬ N ИЗ АРХИВА".
-        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
         deleted_phones = []
@@ -902,6 +823,11 @@ def register(ctx):
                 if task and not task.done():
                     task.cancel()
                 await close_client(acc.phone)
+                try:
+                    db.log_action(uid, "archive_clear",
+                                  details=acc.phone, account_id=acc.id)
+                except Exception:
+                    pass
                 db.delete_account(acc.id)
                 deleted_phones.append(acc.phone)
             except Exception as e:
@@ -910,7 +836,7 @@ def register(ctx):
                 ctx.unlock_account(acc.id)
 
         db.log_action(
-            uid, "archive_clear",
+            uid, "archive_clear_summary",
             details=f"count={len(deleted_phones)}: "
                     + ", ".join(deleted_phones),
         )

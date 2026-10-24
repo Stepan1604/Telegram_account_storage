@@ -31,24 +31,14 @@ def register(ctx):
     """
     Регистрирует хендлеры добавления и переименования аккаунтов.
 
-    Флоу добавления состоит из 4–5 шагов: имя → номер → код → [2FA] → [email].
+    Флоу добавления: имя → номер → код → [2FA] → [email].
     Шаг email выполняется только если в config.py задан LOGIN_EMAIL.
-    В конце вызывается _finalize_add, который сохраняет аккаунт в БД
-    и планирует автоочистку. Также сюда входит FSM переименования,
-    FSM привязки email из карточки аккаунта и общий text_router.
-
-    :param ctx: объект Context с общим состоянием.
     """
     bot = ctx.bot
 
     @bot.callback_query_handler(func=lambda c: c.data == "add_account")
     @admin_required
     async def cb_add(call: types.CallbackQuery):
-        """
-        Начинает флоу добавления аккаунта — шаг 1 (ввод имени).
-
-        :param call: callback_query от кнопки "➕ ДОБАВИТЬ АККАУНТ".
-        """
         await bot.answer_callback_query(call.id)
         uid = call.from_user.id
 
@@ -78,12 +68,6 @@ def register(ctx):
         await edit_or_send(bot, call, text, kbd.cancel())
 
     async def state_add_name_pre(message, state):
-        """
-        Шаг 1: принимает имя аккаунта или "-" для дефолтного.
-
-        :param message: объект Message с именем.
-        :param state: текущее FSM-состояние пользователя.
-        """
         uid = message.from_user.id
         raw = (message.text or "").strip()
 
@@ -113,12 +97,6 @@ def register(ctx):
                                reply_markup=kbd.cancel())
 
     async def state_add_phone(message, state):
-        """
-        Шаг 2: принимает номер телефона и отправляет код.
-
-        :param message: объект Message с номером.
-        :param state: текущее FSM-состояние пользователя.
-        """
         uid = message.from_user.id
         phone = fmt_phone(message.text.strip())
 
@@ -162,12 +140,6 @@ def register(ctx):
                                reply_markup=kbd.cancel())
 
     async def state_add_code(message, state):
-        """
-        Шаг 3: принимает код из Telegram.
-
-        :param message: объект Message с кодом.
-        :param state: текущее FSM-состояние пользователя.
-        """
         uid = message.from_user.id
         code = message.text.strip().replace(" ", "")
 
@@ -213,12 +185,6 @@ def register(ctx):
         await bot.send_message(message.chat.id, f"❌ {msg}")
 
     async def state_add_2fa(message, state):
-        """
-        Шаг 4: принимает пароль 2FA.
-
-        :param message: объект Message с паролем 2FA.
-        :param state: текущее FSM-состояние пользователя.
-        """
         uid = message.from_user.id
         password = message.text.strip()
 
@@ -244,14 +210,6 @@ def register(ctx):
         await _finalize_add(message, uid, data, session, two_fa_value)
 
     async def _apply_post_login(message, data, password_used: str):
-        """
-        Пост-логин: устанавливает или меняет 2FA-пароль из config.
-
-        :param message: объект Message для отправки уведомлений.
-        :param data: словарь из pending_signins с клиентом и номером.
-        :param password_used: пароль, введённый пользователем (если был).
-        :return: (session_string, two_fa_value).
-        """
         two_fa_value = password_used or ""
         session = ""
 
@@ -309,19 +267,6 @@ def register(ctx):
         return session, two_fa_value
 
     async def _maybe_send_email_step(message, uid, data):
-        """
-        Опциональный шаг: отправляет код на email и переводит FSM
-        в состояние add_email_code.
-
-        Вызывается только если LOGIN_EMAIL задан в config.py.
-        Если отправка не удалась — шаг пропускается (возврат False),
-        и вызывающий код сразу идёт в _finalize_add.
-
-        :param message: объект Message.
-        :param uid: Telegram ID пользователя.
-        :param data: словарь из pending_signins.
-        :return: True, если перешли в FSM (ждём код), иначе False.
-        """
         if not LOGIN_EMAIL:
             return False
 
@@ -355,15 +300,6 @@ def register(ctx):
         return True
 
     async def state_add_email_code(message, state):
-        """
-        Шаг 5 (опциональный): принимает код из email и подтверждает привязку.
-
-        Если пользователь отправил «-» — шаг пропускается, аккаунт
-        сохраняется без привязки email.
-
-        :param message: объект Message с кодом.
-        :param state: текущее FSM-состояние пользователя.
-        """
         uid = message.from_user.id
         code = (message.text or "").strip()
 
@@ -395,24 +331,32 @@ def register(ctx):
                 message.chat.id,
                 f"✅ Почта {email_shown} привязана для входа",
             )
+            # Пока аккаунт ещё не в БД (id неизвестен), пишем в лог
+            # без account_id — потом, после _finalize_add, увидим
+            # привязку по номеру телефона.
+            try:
+                db.log_action(
+                    uid, "email_bind",
+                    details=f"{email_shown} (new account)",
+                )
+            except Exception:
+                pass
         else:
             await bot.send_message(
                 message.chat.id,
                 f"❌ Не удалось привязать почту: {msg}",
             )
+            try:
+                db.log_action(
+                    uid, "email_bind_fail",
+                    details=f"{LOGIN_EMAIL}: {msg[:100]} (new account)",
+                )
+            except Exception:
+                pass
 
         await _finalize_add(message, uid, data, session, two_fa_value)
 
     async def _finalize_add(message, uid, data, session, two_fa_value):
-        """
-        Сохраняет аккаунт в БД, закрывает клиент, планирует автоочистку.
-
-        :param message: объект Message для ответа.
-        :param uid: Telegram ID пользователя.
-        :param data: словарь из pending_signins.
-        :param session: строка сессии.
-        :param two_fa_value: финальное значение 2FA.
-        """
         name_val = ctx.pending_names.get(uid)
         final_name = name_val or data["phone"]
         phone = fmt_phone(data["phone"])
@@ -511,12 +455,6 @@ def register(ctx):
             logger.error(f"[finalize] send: {type(e).__name__}: {e}")
 
     async def state_rename_account(message, state):
-        """
-        FSM-обработчик переименования аккаунта.
-
-        :param message: объект Message с новым именем.
-        :param state: словарь с acc_id и page (origin).
-        """
         uid = message.from_user.id
         new_name = (message.text or "").strip()
         acc_id = state.get("acc_id")
@@ -559,20 +497,13 @@ def register(ctx):
         )
 
     async def state_email_verify(message, state):
-        """
-        FSM-обработчик ввода кода из email при привязке почты к уже
-        существующему аккаунту (запускается из карточки аккаунта).
-
-        :param message: объект Message с кодом.
-        :param state: dict с acc_id, origin, email_hash.
-        """
         uid = message.from_user.id
         code = (message.text or "").strip()
         acc_id = state.get("acc_id")
         origin = state.get("origin", "r")
         email_hash = state.get("email_hash")
 
-        if not acc_id or not email_hash:
+        if not acc_id:
             ctx.user_state.pop(uid, None)
             await bot.send_message(message.chat.id, "❌ Сессия потеряна")
             return
@@ -588,6 +519,14 @@ def register(ctx):
         except Exception as e:
             logger.error(f"[email_verify] connect: {type(e).__name__}: {e}")
             ctx.user_state.pop(uid, None)
+            try:
+                db.log_action(
+                    uid, "email_bind_fail",
+                    details=f"connect: {str(e)[:100]}",
+                    account_id=acc_id,
+                )
+            except Exception:
+                pass
             await bot.send_message(
                 message.chat.id, f"❌ Не удалось подключиться: {e}")
             return
@@ -601,6 +540,14 @@ def register(ctx):
 
         if ok:
             email_shown = email or LOGIN_EMAIL
+            try:
+                db.log_action(
+                    uid, "email_bind",
+                    details=email_shown,
+                    account_id=acc_id,
+                )
+            except Exception:
+                pass
             await bot.send_message(
                 message.chat.id,
                 f"✅ Почта {email_shown} привязана для входа\n\n"
@@ -612,6 +559,14 @@ def register(ctx):
                 ]),
             )
         else:
+            try:
+                db.log_action(
+                    uid, "email_bind_fail",
+                    details=f"{LOGIN_EMAIL}: {msg[:100]}",
+                    account_id=acc_id,
+                )
+            except Exception:
+                pass
             await bot.send_message(
                 message.chat.id,
                 f"❌ Не удалось привязать почту: {msg}",
@@ -634,11 +589,6 @@ def register(ctx):
     @bot.message_handler(func=lambda m: True, content_types=["text"])
     @admin_required
     async def text_router(message: types.Message):
-        """
-        Централизованный роутер текстовых сообщений.
-
-        :param message: объект Message с текстом.
-        """
         uid = message.from_user.id
 
         if message.text and message.text.startswith("/"):

@@ -22,25 +22,9 @@ logger = logging.getLogger(__name__)
 
 
 def register(ctx):
-    """
-    Регистрирует хендлеры отчётов и экспорта.
-
-    Включает: общий отчёт, статистику за 30 дней, отчёты по аккаунтам,
-    топ источников, экспорт CSV (все аккаунты, логи, история одного
-    аккаунта).
-
-    :param ctx: объект Context с общим состоянием.
-    """
     bot = ctx.bot
 
     async def _render_reports_menu(chat_id, edit_id=None, call=None):
-        """
-        Рисует меню отчётов.
-
-        :param chat_id: ID чата.
-        :param edit_id: ID сообщения для редактирования.
-        :param call: callback_query (если вызвано из кнопки).
-        """
         text = (
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "📊 ОТЧЁТЫ\n"
@@ -62,25 +46,12 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "reports_menu")
     @admin_required
     async def cb_reports_menu(call: types.CallbackQuery):
-        """
-        Открывает меню отчётов.
-
-        :param call: callback_query от кнопки "📊 ОТЧЁТЫ".
-        """
         await bot.answer_callback_query(call.id)
         await _render_reports_menu(call.message.chat.id, call=call)
 
     @bot.callback_query_handler(func=lambda c: c.data == "report_total")
     @admin_required
     async def cb_report_total(call: types.CallbackQuery):
-        """
-        Показывает общий отчёт по хранилищу.
-
-        Собирает статистику из accounts_stats, lzt_stats и totals_stats
-        и выводит одним сообщением.
-
-        :param call: callback_query от кнопки "📊 ОБЩИЙ ОТЧЁТ".
-        """
         await bot.answer_callback_query(call.id)
 
         s = db.get_accounts_stats()
@@ -119,14 +90,6 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "report_30d")
     @admin_required
     async def cb_report_30d(call: types.CallbackQuery):
-        """
-        Показывает отчёт за 30 дней.
-
-        Выводит по одной строке на день в формате: добавлено,
-        очищено, dead, LZT, потрачено.
-
-        :param call: callback_query от кнопки "📅 ЗА 30 ДНЕЙ".
-        """
         await bot.answer_callback_query(call.id)
 
         rows = db.get_daily_stats(days=30)
@@ -170,14 +133,6 @@ def register(ctx):
         )
 
     async def _render_report_accounts(chat_id, page, edit_id=None, call=None):
-        """
-        Рисует страницу списка аккаунтов для отчётов.
-
-        :param chat_id: ID чата.
-        :param page: номер страницы.
-        :param edit_id: ID сообщения для редактирования.
-        :param call: callback_query (если вызвано из кнопки).
-        """
         accounts = db.get_accounts()
 
         if not accounts:
@@ -215,11 +170,6 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "report_accounts")
     @admin_required
     async def cb_report_accounts(call: types.CallbackQuery):
-        """
-        Открывает список аккаунтов для отчётов.
-
-        :param call: callback_query от кнопки "📱 ПО АККАУНТАМ".
-        """
         await bot.answer_callback_query(call.id)
         await _render_report_accounts(call.message.chat.id, 0, call=call)
 
@@ -228,11 +178,6 @@ def register(ctx):
     )
     @admin_required
     async def cb_report_accounts_page(call: types.CallbackQuery):
-        """
-        Переключает страницу списка аккаунтов для отчётов.
-
-        :param call: callback_query с data="report_accounts_page_N".
-        """
         await bot.answer_callback_query(call.id)
         try:
             page = int(call.data.replace("report_accounts_page_", ""))
@@ -242,16 +187,6 @@ def register(ctx):
 
     async def _render_account_report(call: types.CallbackQuery, acc_id: int,
                                      page: int = 0):
-        """
-        Показывает детальный отчёт по одному аккаунту.
-
-        Включает: идентификацию, безопасность, источник, статистику
-        действий и последние действия из actions_log.
-
-        :param call: callback_query.
-        :param acc_id: ID аккаунта.
-        :param page: номер страницы для возврата.
-        """
         acc = db.get_account(acc_id)
         if not acc:
             await edit_or_send(bot, call, "❌ Аккаунт не найден",
@@ -284,6 +219,18 @@ def register(ctx):
                 for a in actions[:8]
             )
 
+        origin_lines = ""
+        if counts.get("add", 0):
+            origin_lines += f"  ➕ Добавлен вручную:   {counts['add']}\n"
+        if counts.get("buy_single", 0):
+            origin_lines += f"  🛒 Куплен (одиночная): {counts['buy_single']}\n"
+        if counts.get("buy_by_id", 0):
+            origin_lines += f"  🎯 Куплен (по лоту):   {counts['buy_by_id']}\n"
+        if counts.get("buy_bulk", 0):
+            origin_lines += f"  📦 Куплен (оптовая):   {counts['buy_bulk']}\n"
+        if counts.get("import", 0):
+            origin_lines += f"  📥 Импортирован:       {counts['import']}\n"
+
         text = (
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "📊 ОТЧЁТ ПО АККАУНТУ\n"
@@ -303,6 +250,7 @@ def register(ctx):
             f"  🛒 Откуда:      {source_line}\n"
             f"  💰 Цена:        {acc.price or 0} ₽\n\n"
             "📈 СТАТИСТИКА ДЕЙСТВИЙ\n"
+            f"{origin_lines}"
             f"  🔍 Проверок:    {counts.get('check', 0)}\n"
             f"  🧹 Очисток:     {counts.get('clean', 0)}\n"
             f"  🗑️ Чисток чатов: {counts.get('clear_chats', 0)}\n"
@@ -316,11 +264,6 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data.startswith("acc_report_"))
     @admin_required
     async def cb_acc_report(call: types.CallbackQuery):
-        """
-        Открывает детальный отчёт по аккаунту.
-
-        :param call: callback_query с data="acc_report_{id}_{page}".
-        """
         await bot.answer_callback_query(call.id)
         try:
             _, _, acc_id, page = call.data.split("_")
@@ -333,13 +276,6 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data.startswith("acc_history_"))
     @admin_required
     async def cb_acc_history(call: types.CallbackQuery):
-        """
-        Показывает историю действий по аккаунту.
-
-        Выводит до 30 последних записей из actions_log.
-
-        :param call: callback_query от кнопки "📜 История действий".
-        """
         await bot.answer_callback_query(call.id, "📜")
         try:
             _, _, acc_id, page = call.data.split("_")
@@ -386,14 +322,6 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "report_sources")
     @admin_required
     async def cb_report_sources(call: types.CallbackQuery):
-        """
-        Показывает отчёт по источникам аккаунтов.
-
-        Считает, сколько аккаунтов добавлено вручную, куплено на LZT,
-        импортировано. Плюс финансовая сводка по LZT.
-
-        :param call: callback_query от кнопки "🏆 ТОП ИСТОЧНИКОВ".
-        """
         await bot.answer_callback_query(call.id)
 
         accounts = db.get_accounts()
@@ -429,11 +357,6 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "report_export_all")
     @admin_required
     async def cb_report_export_all(call: types.CallbackQuery):
-        """
-        Экспортирует все аккаунты в CSV.
-
-        :param call: callback_query от кнопки "📤 ЭКСПОРТ ВСЕХ (CSV)".
-        """
         await bot.answer_callback_query(call.id, "📤 Готовлю файл...")
 
         accounts = db.get_accounts()
@@ -482,11 +405,6 @@ def register(ctx):
     @bot.callback_query_handler(func=lambda c: c.data == "report_export_logs")
     @admin_required
     async def cb_report_export_logs(call: types.CallbackQuery):
-        """
-        Экспортирует все логи действий в CSV.
-
-        :param call: callback_query от кнопки "📜 ЭКСПОРТ ЛОГОВ (CSV)".
-        """
         await bot.answer_callback_query(call.id, "📤 Готовлю файл...")
 
         actions = db.get_recent_actions(limit=5000)
@@ -536,11 +454,6 @@ def register(ctx):
     )
     @admin_required
     async def cb_acc_history_export(call: types.CallbackQuery):
-        """
-        Экспортирует историю одного аккаунта в CSV.
-
-        :param call: callback_query от кнопки "📤 ЭКСПОРТ ИСТОРИИ".
-        """
         await bot.answer_callback_query(call.id, "📤 Готовлю файл...")
         try:
             parts = call.data.split("_")
