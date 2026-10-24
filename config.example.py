@@ -1,79 +1,38 @@
-# config.example.py
-# Скопируй в config.py и подставь свои значения:
-#   Linux/Mac:  cp config.example.py config.py
-#   Windows:    copy config.example.py config.py
+"""Конфигурация Telegram Account Manager."""
 
-# ==========================================
-# ТЕЛЕГРАМ-БОТ
-# ==========================================
+# --- Telegram ---
+BOT_TOKEN = "123456:ABC..."             # токен от @BotFather
+ADMIN_ID = 123456789                    # главный админ
+ADMINS = [123456789, 987654321]         # список админов
+API_ID = 1234567                        # my.telegram.org
+API_HASH = "abc123def456..."
 
-BOT_TOKEN = "123456789:AAAA-your-real-token-here"
-ADMIN_ID = 0                    # твой Telegram ID
-ADMINS = []                     # дополнительные админы (список ID)
-HELPER_ID = None                # если None — используется ADMIN_ID
+# --- База данных ---
+DB_URL = "postgresql+asyncpg://user:pass@host/db"  # fallback: data/storage.db
+SESSION_ENCRYPTION_KEY = ""             # "" → data/secret.key
 
-# ==========================================
-# TELETHON API
-# Получить: https://my.telegram.org/apps
-# ==========================================
+# --- 2FA и почта ---
+PASSWORD_2FA = "MySecret2FA"            # авто-установка на новые аккаунты
+LOGIN_EMAIL = "accounts@example.com"    # email для привязки
+IMAP_HOST = "imap.gmail.com"
+IMAP_USER = "accounts@example.com"
+IMAP_PASSWORD = "app-password"
 
-API_ID = 0
-API_HASH = "your_api_hash_here"
+# --- LZT Market ---
+LZT_API_TOKEN = "your_lzt_token"
+LZT_PROXY = ""
+MIN_PRICE = 0
+SPAM_FILTER = "no"                      # "no" | "yes"
 
-# ==========================================
-# БАЗА ДАННЫХ
-# ==========================================
-
-# SQLite (для теста):
-DB_URL = "sqlite:///storage.db"
-
-# PostgreSQL (для прода):
-# DB_URL = "postgresql+asyncpg://postgres:password@localhost:5432/NumberShop"
-
-# ==========================================
-# 2FA И TTL
-# ==========================================
-
-PASSWORD_2FA = ""               # пароль, который ставится на новые аккаунты
-SESSION_TTL_DAYS = 365          # 12 месяцев
-
-# ==========================================
-# LZT MARKET (опционально)
-# ==========================================
-
-LZT_API_TOKEN = ""
-LZT_PROXY = None
+# --- Поведение ---
+AUTO_CLEAN_DELAY = 24 * 60 * 60 + 10    # сек. после добавления
 BUY_DELAY = 3
 CODE_DELAY = 5
-CODE_ATTEMPTS = 8
-CODE_ROUNDS = 3
-MIN_PRICE = 0
-SPAM_FILTER = None
-NO_LOTS_RETRIES = 40
-NO_LOTS_DELAY = 10
+CODE_ATTEMPTS = 4
+CODE_ROUNDS = 2
 
-# ==========================================
-# ШИФРОВАНИЕ SESSION
-# ==========================================
-
-# Оставь пустым "" — ключ сгенерируется автоматически в secret.key.
-# ⚠️ СОХРАНИ secret.key! Без него все session не расшифруются.
-SESSION_ENCRYPTION_KEY = ""
-
-# ==========================================
-# БАЗА СТРАН
-# ==========================================
-
+# --- Справочник стран ---
 COUNTRIES = [
     {"code": "RU", "name": "Россия", "flag": "🇷🇺", "phone_code": "+7"},
     {"code": "US", "name": "США", "flag": "🇺🇸", "phone_code": "+1"},
-    {"code": "GB", "name": "Великобритания", "flag": "🇬🇧", "phone_code": "+44"},
-    {"code": "DE", "name": "Германия", "flag": "🇩🇪", "phone_code": "+49"},
-    {"code": "FR", "name": "Франция", "flag": "🇫🇷", "phone_code": "+33"},
-    {"code": "UA", "name": "Украина", "flag": "🇺🇦", "phone_code": "+380"},
-    {"code": "KZ", "name": "Казахстан", "flag": "🇰🇿", "phone_code": "+7"},
-    {"code": "TR", "name": "Турция", "flag": "🇹🇷", "phone_code": "+90"},
-    {"code": "IN", "name": "Индия", "flag": "🇮🇳", "phone_code": "+91"},
-    {"code": "ID", "name": "Индонезия", "flag": "🇮🇩", "phone_code": "+62"},
-    # ... добавь остальные
 ]
