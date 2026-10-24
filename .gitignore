@@ -5,8 +5,6 @@ config.py
 !.env.example
 secret.key
 *.key
-.venv/
-venv/
 
 # ===== Данные / бэкапы / сессии =====
 *.session
